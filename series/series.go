@@ -113,12 +113,12 @@ func (s Series[T]) ValueOr(i int, fallback T) T {
 
 // FirstPresent returns the first non-null value and whether one exists.
 func (s Series[T]) FirstPresent() (T, bool) {
-	return reduce.FirstPresent[T](s, nil)
+	return reduce.FirstPresent(s, nil)
 }
 
 // LastPresent returns the last non-null value and whether one exists.
 func (s Series[T]) LastPresent() (T, bool) {
-	return reduce.LastPresent[T](s, nil)
+	return reduce.LastPresent(s, nil)
 }
 
 // Values returns a shallow copy of the physical values. Values at null rows are
@@ -616,13 +616,6 @@ func (s Series[T]) IsNull() mask.Mask {
 	if !s.validity.Initialized() {
 		return mask.None(s.Len())
 	}
-	nullCount := s.NullCount()
-	if nullCount == 0 {
-		return mask.None(s.Len())
-	}
-	if nullCount == s.Len() {
-		return mask.All(s.Len())
-	}
 	return mask.Mask(s.validity.Not())
 }
 
@@ -632,15 +625,6 @@ func (s Series[T]) IsNotNull() mask.Mask {
 	if !s.validity.Initialized() {
 		return mask.All(s.Len())
 	}
-	nullCount := s.NullCount()
-	if nullCount == 0 {
-		return mask.All(s.Len())
-	}
-	if nullCount == s.Len() {
-		return mask.None(s.Len())
-	}
-	// Clone normalizes a sliced validity view to Mask's aligned storage
-	// invariant while keeping the returned value independent.
 	return mask.Mask(s.validity.Clone())
 }
 

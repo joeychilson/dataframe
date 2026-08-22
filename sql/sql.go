@@ -148,7 +148,7 @@ func (r *Reader) ReadRecords[T any]() (records []T, err error) {
 			scanners[i].field = columnFields[i]
 			destinations[i] = &scanners[i]
 		} else {
-			destinations[i] = new(any)
+			destinations[i] = new(stdsql.RawBytes)
 		}
 	}
 	for row := 0; rows.Next(); row++ {

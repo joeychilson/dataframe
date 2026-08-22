@@ -291,6 +291,42 @@ func TestNilAndOneShotErrors(t *testing.T) {
 	}
 }
 
+func BenchmarkReadRecordsIgnoredBytes(b *testing.B) {
+	type result struct {
+		ID    int64   `df:"id"`
+		Name  string  `df:"name"`
+		Score float64 `df:"score"`
+	}
+	payload := []byte(strings.Repeat("x", 128))
+	rows := make([][]driver.Value, 10_000)
+	for i := range rows {
+		rows[i] = []driver.Value{int64(i), "value", float64(i), payload, payload}
+	}
+	db, _ := openTestDB(map[string]queryResult{
+		"records": {
+			names:     []string{"id", "name", "score", "ignored_a", "ignored_b"},
+			scanTypes: []reflect.Type{reflect.TypeFor[int64](), reflect.TypeFor[string](), reflect.TypeFor[float64](), reflect.TypeFor[[]byte](), reflect.TypeFor[[]byte]()},
+			rows:      rows,
+		},
+	})
+	defer db.Close()
+	ctx := context.Background()
+	b.ReportAllocs()
+	for b.Loop() {
+		rows, err := db.QueryContext(ctx, "records")
+		if err != nil {
+			b.Fatal(err)
+		}
+		records, err := ReadRecords[result](rows)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(records) != 10_000 {
+			b.Fatalf("record count = %d", len(records))
+		}
+	}
+}
+
 type scanCode int
 
 func (c *scanCode) Scan(source any) error {

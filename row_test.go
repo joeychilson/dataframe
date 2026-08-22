@@ -106,6 +106,68 @@ func TestFromRecordsAndRecords(t *testing.T) {
 	}
 }
 
+func TestFromRecordsUsesTypedStorageForBuiltins(t *testing.T) {
+	type recordID int
+	type record struct {
+		Bool       bool
+		String     string
+		Int        int
+		Int8       int8
+		Int16      int16
+		Int32      int32
+		Int64      int64
+		Uint       uint
+		Uint8      uint8
+		Uint16     uint16
+		Uint32     uint32
+		Uint64     uint64
+		Uintptr    uintptr
+		Float32    float32
+		Float64    float64
+		Complex64  complex64
+		Complex128 complex128
+		Pointer    *int
+		Optional   series.Optional[string]
+		Defined    recordID
+		Slice      []int
+	}
+	value := 1
+	frame, err := FromRecords([]record{{Pointer: &value, Optional: series.Some("value")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTypedRecordColumn[bool](t, frame, "Bool")
+	assertTypedRecordColumn[string](t, frame, "String")
+	assertTypedRecordColumn[int](t, frame, "Int")
+	assertTypedRecordColumn[int8](t, frame, "Int8")
+	assertTypedRecordColumn[int16](t, frame, "Int16")
+	assertTypedRecordColumn[int32](t, frame, "Int32")
+	assertTypedRecordColumn[int64](t, frame, "Int64")
+	assertTypedRecordColumn[uint](t, frame, "Uint")
+	assertTypedRecordColumn[uint8](t, frame, "Uint8")
+	assertTypedRecordColumn[uint16](t, frame, "Uint16")
+	assertTypedRecordColumn[uint32](t, frame, "Uint32")
+	assertTypedRecordColumn[uint64](t, frame, "Uint64")
+	assertTypedRecordColumn[uintptr](t, frame, "Uintptr")
+	assertTypedRecordColumn[float32](t, frame, "Float32")
+	assertTypedRecordColumn[float64](t, frame, "Float64")
+	assertTypedRecordColumn[complex64](t, frame, "Complex64")
+	assertTypedRecordColumn[complex128](t, frame, "Complex128")
+	assertTypedRecordColumn[int](t, frame, "Pointer")
+	assertTypedRecordColumn[string](t, frame, "Optional")
+	for _, name := range []string{"Pointer", "Optional"} {
+		if !frame.columns[frame.columnIndex(name)].columnNullable() {
+			t.Fatalf("column %q is not nullable", name)
+		}
+	}
+	for _, name := range []string{"Defined", "Slice"} {
+		index := frame.columnIndex(name)
+		if _, ok := frame.columns[index].(reflectColumnSpec); !ok {
+			t.Fatalf("column %q storage is %T, want reflectColumnSpec", name, frame.columns[index])
+		}
+	}
+}
+
 func TestRecordErrors(t *testing.T) {
 	if _, err := FromRecords([]*struct{}{}); !errors.Is(err, ErrInvalidRecord) {
 		t.Fatalf("pointer record error = %v", err)
@@ -236,6 +298,38 @@ func BenchmarkRecords(b *testing.B) {
 	}
 }
 
+func BenchmarkColumnRecordColumn(b *testing.B) {
+	type record struct {
+		Value int
+	}
+	frame, err := FromRecords(make([]record, 10_000))
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := frame.Column[int]("Value"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkFilterRecordColumns(b *testing.B) {
+	type record struct {
+		ID   int
+		Name string
+	}
+	frame, err := FromRecords(make([]record, 10_000))
+	if err != nil {
+		b.Fatal(err)
+	}
+	selection := mask.NewFunc(frame.Len(), func(i int) bool { return i%2 == 0 })
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = frame.Filter(selection)
+	}
+}
+
 func BenchmarkRowGetRecordColumn(b *testing.B) {
 	type record struct {
 		Value int
@@ -250,5 +344,16 @@ func BenchmarkRowGetRecordColumn(b *testing.B) {
 		if _, _, err := row.Get[int]("Value"); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+func assertTypedRecordColumn[T any](t *testing.T, frame Frame, name string) {
+	t.Helper()
+	index := frame.columnIndex(name)
+	if index < 0 {
+		t.Fatalf("column %q not found", name)
+	}
+	if _, ok := frame.columns[index].(columnSpec[T]); !ok {
+		t.Fatalf("column %q storage is %T, want columnSpec[%v]", name, frame.columns[index], reflect.TypeFor[T]())
 	}
 }

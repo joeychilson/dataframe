@@ -71,6 +71,63 @@ func (c ColumnView) At(i int) (any, bool) {
 	return c.values.columnAt(i)
 }
 
+func columnFromSlice(name string, values reflect.Value, validity []bool) ColumnSpec {
+	switch typed := values.Interface().(type) {
+	case []bool:
+		return typedColumnFromSlice(name, typed, validity)
+	case []string:
+		return typedColumnFromSlice(name, typed, validity)
+	case []int:
+		return typedColumnFromSlice(name, typed, validity)
+	case []int8:
+		return typedColumnFromSlice(name, typed, validity)
+	case []int16:
+		return typedColumnFromSlice(name, typed, validity)
+	case []int32:
+		return typedColumnFromSlice(name, typed, validity)
+	case []int64:
+		return typedColumnFromSlice(name, typed, validity)
+	case []uint:
+		return typedColumnFromSlice(name, typed, validity)
+	case []uint8:
+		return typedColumnFromSlice(name, typed, validity)
+	case []uint16:
+		return typedColumnFromSlice(name, typed, validity)
+	case []uint32:
+		return typedColumnFromSlice(name, typed, validity)
+	case []uint64:
+		return typedColumnFromSlice(name, typed, validity)
+	case []uintptr:
+		return typedColumnFromSlice(name, typed, validity)
+	case []float32:
+		return typedColumnFromSlice(name, typed, validity)
+	case []float64:
+		return typedColumnFromSlice(name, typed, validity)
+	case []complex64:
+		return typedColumnFromSlice(name, typed, validity)
+	case []complex128:
+		return typedColumnFromSlice(name, typed, validity)
+	default:
+		return reflectColumnSpec{
+			name:     name,
+			typeOf:   values.Type().Elem(),
+			values:   values,
+			validity: validity,
+		}
+	}
+}
+
+func typedColumnFromSlice[T any](name string, values []T, validity []bool) ColumnSpec {
+	if validity == nil {
+		return Column(name, values)
+	}
+	typed, err := series.NewNullable(values, validity)
+	if err != nil {
+		panic(err)
+	}
+	return ColumnFromSeries(name, typed)
+}
+
 type reflectColumnSpec struct {
 	name     string
 	typeOf   reflect.Type

@@ -111,12 +111,7 @@ func FromRecords[T any](records []T) (Frame, error) {
 				}
 			}
 		}
-		columns[i] = reflectColumnSpec{
-			name:     field.Name,
-			typeOf:   field.ValueType,
-			values:   values,
-			validity: validity,
-		}
+		columns[i] = columnFromSlice(field.Name, values, validity)
 	}
 	return New(columns...)
 }

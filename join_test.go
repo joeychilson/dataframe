@@ -383,6 +383,32 @@ func BenchmarkInnerJoin(b *testing.B) {
 	}
 }
 
+func BenchmarkInnerJoinRecordColumns(b *testing.B) {
+	type record struct {
+		Key int
+	}
+	const size = 10_000
+	records := make([]record, size)
+	for i := range records {
+		records[i].Key = i
+	}
+	left, err := FromRecords(records)
+	if err != nil {
+		b.Fatal(err)
+	}
+	right, err := FromRecords(records)
+	if err != nil {
+		b.Fatal(err)
+	}
+	key := Using[int]("Key")
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := left.InnerJoin(right, key); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkLeftJoin(b *testing.B) {
 	const size = 10_000
 	keys := make([]int, size)

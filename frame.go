@@ -391,6 +391,9 @@ func (f Frame) Distinct() (Frame, error) {
 		}
 		return f.Take(rows), nil
 	}
+	if rows, ok := distinctBuiltinFrameRows(f.columns, f.Len()); ok {
+		return f.Take(rows), nil
+	}
 
 	fields := make([]reflect.StructField, 0, f.Width()*2)
 	for i, column := range f.columns {
@@ -447,7 +450,7 @@ func (f Frame) DistinctByUsing[K any](key series.Series[K], hasher maphash.Hashe
 	if key.Len() != f.Len() {
 		panic(fmt.Sprintf("dataframe: DistinctByUsing: length mismatch: frame=%d key=%d", f.Len(), key.Len()))
 	}
-	seen := hashmap.New[K, struct{}](hasher)
+	seen := hashmap.New[K, struct{}](hasher, key.Len())
 	nullSeen := false
 	rows := make([]int, 0, key.Len())
 	for i := 0; i < key.Len(); i++ {
@@ -575,6 +578,19 @@ func (c columnSpec[T]) columnConcat(others []ColumnSpec) (ColumnSpec, error) {
 	return c, nil
 }
 
+type distinctColumn interface {
+	hash(*maphash.Hash, int)
+	equal(int, int) bool
+}
+
+type typedDistinctColumn[T comparable] struct {
+	values series.Series[T]
+}
+
+type distinctRowHasher struct {
+	columns []distinctColumn
+}
+
 func distinctBuiltinRows(column ColumnSpec) ([]int, bool) {
 	switch column := column.(type) {
 	case columnSpec[bool]:
@@ -614,6 +630,98 @@ func distinctBuiltinRows(column ColumnSpec) ([]int, bool) {
 	default:
 		return nil, false
 	}
+}
+
+func distinctBuiltinFrameRows(columns []ColumnSpec, length int) ([]int, bool) {
+	distinctColumns := make([]distinctColumn, len(columns))
+	for i, column := range columns {
+		var ok bool
+		distinctColumns[i], ok = newDistinctColumn(column)
+		if !ok {
+			return nil, false
+		}
+	}
+
+	seen := hashmap.New[int, struct{}](distinctRowHasher{columns: distinctColumns}, length)
+	rows := make([]int, 0, length)
+	for row := range length {
+		if _, loaded := seen.LoadOrStore(row, struct{}{}); !loaded {
+			rows = append(rows, row)
+		}
+	}
+	return rows, true
+}
+
+func newDistinctColumn(column ColumnSpec) (distinctColumn, bool) {
+	switch column := column.(type) {
+	case columnSpec[bool]:
+		return typedDistinctColumn[bool]{values: column.values}, true
+	case columnSpec[string]:
+		return typedDistinctColumn[string]{values: column.values}, true
+	case columnSpec[int]:
+		return typedDistinctColumn[int]{values: column.values}, true
+	case columnSpec[int8]:
+		return typedDistinctColumn[int8]{values: column.values}, true
+	case columnSpec[int16]:
+		return typedDistinctColumn[int16]{values: column.values}, true
+	case columnSpec[int32]:
+		return typedDistinctColumn[int32]{values: column.values}, true
+	case columnSpec[int64]:
+		return typedDistinctColumn[int64]{values: column.values}, true
+	case columnSpec[uint]:
+		return typedDistinctColumn[uint]{values: column.values}, true
+	case columnSpec[uint8]:
+		return typedDistinctColumn[uint8]{values: column.values}, true
+	case columnSpec[uint16]:
+		return typedDistinctColumn[uint16]{values: column.values}, true
+	case columnSpec[uint32]:
+		return typedDistinctColumn[uint32]{values: column.values}, true
+	case columnSpec[uint64]:
+		return typedDistinctColumn[uint64]{values: column.values}, true
+	case columnSpec[uintptr]:
+		return typedDistinctColumn[uintptr]{values: column.values}, true
+	case columnSpec[float32]:
+		return typedDistinctColumn[float32]{values: column.values}, true
+	case columnSpec[float64]:
+		return typedDistinctColumn[float64]{values: column.values}, true
+	case columnSpec[complex64]:
+		return typedDistinctColumn[complex64]{values: column.values}, true
+	case columnSpec[complex128]:
+		return typedDistinctColumn[complex128]{values: column.values}, true
+	default:
+		return nil, false
+	}
+}
+
+func (h distinctRowHasher) Hash(hash *maphash.Hash, row int) {
+	for _, column := range h.columns {
+		column.hash(hash, row)
+	}
+}
+
+func (h distinctRowHasher) Equal(left, right int) bool {
+	for _, column := range h.columns {
+		if !column.equal(left, right) {
+			return false
+		}
+	}
+	return true
+}
+
+func (c typedDistinctColumn[T]) hash(hash *maphash.Hash, row int) {
+	value, present := c.values.At(row)
+	if !present {
+		hash.WriteByte(0)
+		return
+	}
+	hash.WriteByte(1)
+	maphash.WriteComparable(hash, value)
+}
+
+func (c typedDistinctColumn[T]) equal(left, right int) bool {
+	leftValue, leftPresent := c.values.At(left)
+	rightValue, rightPresent := c.values.At(right)
+	return leftPresent == rightPresent && (!leftPresent || leftValue == rightValue)
 }
 
 func distinctRows[T comparable](values series.Series[T]) []int {

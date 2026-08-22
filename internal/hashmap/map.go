@@ -19,14 +19,16 @@ type entry[K, V any] struct {
 	next  int
 }
 
-// New returns an empty Map using hasher. It panics when hasher is nil.
-func New[K, V any](hasher maphash.Hasher[K]) *Map[K, V] {
+// New returns an empty Map using hasher, with space for capacity entries. It
+// panics when hasher is nil.
+func New[K, V any](hasher maphash.Hasher[K], capacity int) *Map[K, V] {
 	if hasher == nil {
 		panic("hashmap: nil hasher")
 	}
 	m := &Map[K, V]{
 		hasher:  hasher,
-		buckets: make(map[uint64]int),
+		buckets: make(map[uint64]int, capacity),
+		entries: make([]entry[K, V], 0, capacity),
 	}
 	m.hash.SetSeed(maphash.MakeSeed())
 	return m

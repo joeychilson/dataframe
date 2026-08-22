@@ -17,7 +17,7 @@ func (foldedStringHasher) Equal(left, right string) bool {
 }
 
 func TestMap(t *testing.T) {
-	values := New[string, int](foldedStringHasher{})
+	values := New[string, int](foldedStringHasher{}, 2)
 	values.Set("Go", 1)
 	values.Set("Rust", 2)
 
@@ -47,5 +47,5 @@ func TestNewPanicsForNilHasher(t *testing.T) {
 			t.Fatal("New(nil) did not panic")
 		}
 	}()
-	New[string, int](nil)
+	New[string, int](nil, 0)
 }

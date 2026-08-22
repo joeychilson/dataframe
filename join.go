@@ -42,8 +42,8 @@ func On[K comparable](left, right series.Series[K]) JoinKey[K] {
 func OnBy[K any](left, right series.Series[K], hasher maphash.Hasher[K]) JoinKey[K] {
 	var newLookup func(int) joinLookup[K]
 	if hasher != nil {
-		newLookup = func(int) joinLookup[K] {
-			return hashmap.New[K, joinMatch](hasher)
+		newLookup = func(capacity int) joinLookup[K] {
+			return hashmap.New[K, joinMatch](hasher, capacity)
 		}
 	}
 	return JoinKey[K]{left: left, right: right, newLookup: newLookup}
@@ -81,8 +81,8 @@ func UsingColumns[K comparable](outputName, leftName, rightName string) JoinKey[
 func UsingColumnsBy[K any](outputName, leftName, rightName string, hasher maphash.Hasher[K]) JoinKey[K] {
 	var newLookup func(int) joinLookup[K]
 	if hasher != nil {
-		newLookup = func(int) joinLookup[K] {
-			return hashmap.New[K, joinMatch](hasher)
+		newLookup = func(capacity int) joinLookup[K] {
+			return hashmap.New[K, joinMatch](hasher, capacity)
 		}
 	}
 	return JoinKey[K]{

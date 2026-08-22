@@ -3,6 +3,7 @@ package dataframe
 import (
 	"errors"
 	"hash/maphash"
+	"math"
 	"reflect"
 	"slices"
 	"testing"
@@ -324,6 +325,95 @@ func TestFrameDistinctSingleDefinedColumnUsesFallback(t *testing.T) {
 	}
 }
 
+func TestFrameDistinctMultipleColumnsPreservesOrderAndNulls(t *testing.T) {
+	left, err := series.NewNullable(
+		[]int{2, 2, 0, 0, 2, 2, 1, 1},
+		[]bool{true, true, false, false, true, true, true, true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := series.NewNullable(
+		[]string{"a", "a", "", "", "", "", "a", "a"},
+		[]bool{true, true, false, false, false, false, true, true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, err := New(ColumnFromSeries("left", left), ColumnFromSeries("right", right))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	distinct, err := frame.Distinct()
+	if err != nil {
+		t.Fatal(err)
+	}
+	distinctLeft, err := distinct.Column[int]("left")
+	if err != nil {
+		t.Fatal(err)
+	}
+	distinctRight, err := distinct.Column[string]("right")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantLeft := []series.Optional[int]{series.Some(2), series.None[int](), series.Some(2), series.Some(1)}
+	if got := distinctLeft.Optionals(); !slices.Equal(got, wantLeft) {
+		t.Fatalf("Distinct left values = %v, want %v", got, wantLeft)
+	}
+	wantRight := []series.Optional[string]{series.Some("a"), series.None[string](), series.None[string](), series.Some("a")}
+	if got := distinctRight.Optionals(); !slices.Equal(got, wantRight) {
+		t.Fatalf("Distinct right values = %v, want %v", got, wantRight)
+	}
+}
+
+func TestFrameDistinctMultipleColumnsPreservesFloatEquality(t *testing.T) {
+	frame, err := New(
+		Column("value", []float64{0, math.Copysign(0, -1), math.NaN(), math.NaN()}),
+		Column("group", []int{1, 1, 1, 1}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	distinct, err := frame.Distinct()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := distinct.Len(); got != 3 {
+		t.Fatalf("Distinct length = %d, want 3", got)
+	}
+	values, err := distinct.Column[float64]("value")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := values.Values()
+	if math.Signbit(got[0]) || !math.IsNaN(got[1]) || !math.IsNaN(got[2]) {
+		t.Fatalf("Distinct values = %v, want positive zero followed by two NaNs", got)
+	}
+}
+
+func TestFrameDistinctMultipleColumnsUsesFallback(t *testing.T) {
+	type code int
+	frame, err := New(
+		Column("value", []int{2, 1, 2, 3, 1}),
+		Column("code", []code{20, 10, 20, 30, 10}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	distinct, err := frame.Distinct()
+	if err != nil {
+		t.Fatal(err)
+	}
+	values, err := distinct.Column[int]("value")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := values.Values(), []int{2, 1, 3}; !slices.Equal(got, want) {
+		t.Fatalf("Distinct values = %v, want %v", got, want)
+	}
+}
+
 func TestFrameConcat(t *testing.T) {
 	left, err := New(Column("id", []int{1}), Column("name", []string{"a"}))
 	if err != nil {
@@ -390,6 +480,37 @@ func BenchmarkFrameDistinct(b *testing.B) {
 				values[i] = i % benchmark.cardinality
 			}
 			frame, err := New(Column("value", values))
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := frame.Distinct(); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkFrameDistinctMultipleColumns(b *testing.B) {
+	const size = 10_000
+	benchmarks := []struct {
+		name        string
+		cardinality int
+	}{
+		{name: "100-unique", cardinality: 100},
+		{name: "all-unique", cardinality: size},
+	}
+	for _, benchmark := range benchmarks {
+		b.Run(benchmark.name, func(b *testing.B) {
+			left := make([]int, size)
+			right := make([]int, size)
+			for i := range left {
+				left[i] = i % benchmark.cardinality
+				right[i] = (i * 31) % benchmark.cardinality
+			}
+			frame, err := New(Column("left", left), Column("right", right))
 			if err != nil {
 				b.Fatal(err)
 			}

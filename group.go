@@ -60,7 +60,7 @@ func (f Frame) GroupByUsing[K any](key series.Series[K], hasher maphash.Hasher[K
 		panic(fmt.Sprintf("dataframe: GroupByUsing: length mismatch: frame=%d key=%d", f.Len(), key.Len()))
 	}
 	grouped := Grouped[K]{source: f, key: key}
-	indexes := hashmap.New[K, int](hasher)
+	indexes := hashmap.New[K, int](hasher, key.Len())
 	nullIndex := -1
 	rowGroups := make([]int, key.Len())
 	groupCount := 0

@@ -139,7 +139,7 @@ func In[T comparable](s Series[T], values ...T) mask.Mask {
 // relation. It supports non-comparable values and custom equality and panics
 // when hasher is nil.
 func InUsing[T any](s Series[T], hasher maphash.Hasher[T], values ...T) mask.Mask {
-	set := hashmap.New[T, struct{}](hasher)
+	set := hashmap.New[T, struct{}](hasher, len(values))
 	for _, value := range values {
 		set.Set(value, struct{}{})
 	}

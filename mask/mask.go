@@ -3,85 +3,59 @@ package mask
 import (
 	"iter"
 	"math/bits"
+
+	"github.com/joeychilson/dataframe/internal/bitmap"
 )
 
 const bitsPerWord = 64
 
 // Mask is an immutable, two-valued selection with one bit per row. Its zero
-// value is an empty Mask.
-type Mask struct {
-	bits []uint64
-	n    int
-}
+// value is an empty Mask. Its storage is word-aligned and unused trailing bits
+// are always clear.
+type Mask bitmap.Bitmap
 
 // New returns a Mask containing the selections in selected. The input is
 // copied.
 func New(selected []bool) Mask {
-	m := None(len(selected))
-	for i, selected := range selected {
-		if selected {
-			m.bits[i/bitsPerWord] |= uint64(1) << (i % bitsPerWord)
-		}
-	}
-	return m
+	return Mask(bitmap.FromBools(selected))
 }
 
 // NewFunc returns a Mask spanning n rows for which selected reports whether
 // each row is selected. It calls selected once per row in ascending order and
 // panics when n is negative.
 func NewFunc(n int, selected func(int) bool) Mask {
-	m := None(n)
-	for i := range n {
-		if selected(i) {
-			m.bits[i/bitsPerWord] |= uint64(1) << (i % bitsPerWord)
-		}
-	}
-	return m
+	return Mask(bitmap.NewFunc(n, selected))
 }
 
 // All returns a Mask selecting all n rows. It panics when n is negative.
 func All(n int) Mask {
-	m := None(n)
-	for i := range m.bits {
-		m.bits[i] = ^uint64(0)
-	}
-	if remainder := n % bitsPerWord; remainder != 0 {
-		m.bits[len(m.bits)-1] = (uint64(1) << remainder) - 1
-	}
-	return m
+	return Mask(bitmap.Filled(n))
 }
 
 // None returns a Mask selecting no rows out of n. It panics when n is
 // negative.
 func None(n int) Mask {
-	if n < 0 {
-		panic("mask: negative length")
-	}
-
-	words := n / bitsPerWord
-	if n%bitsPerWord != 0 {
-		words++
-	}
-	return Mask{bits: make([]uint64, words), n: n}
+	return Mask(bitmap.New(n))
 }
 
 // Len returns the number of rows spanned by m.
 func (m Mask) Len() int {
-	return m.n
+	return bitmap.Bitmap(m).Len()
 }
 
 // At reports whether row i is selected. It panics when i is out of range.
 func (m Mask) At(i int) bool {
-	if i < 0 || i >= m.n {
+	if i < 0 || i >= m.Len() {
 		panic("mask: index out of range")
 	}
-	return m.bits[i/bitsPerWord]&(uint64(1)<<(i%bitsPerWord)) != 0
+	words := bitmap.Bitmap(m).AlignedWords()
+	return words[i/bitsPerWord]&(uint64(1)<<(i%bitsPerWord)) != 0
 }
 
 // Count returns the number of selected rows.
 func (m Mask) Count() int {
 	count := 0
-	for _, word := range m.bits {
+	for _, word := range bitmap.Bitmap(m).AlignedWords() {
 		count += bits.OnesCount64(word)
 	}
 	return count
@@ -89,7 +63,7 @@ func (m Mask) Count() int {
 
 // Any reports whether at least one row is selected.
 func (m Mask) Any() bool {
-	for _, word := range m.bits {
+	for _, word := range bitmap.Bitmap(m).AlignedWords() {
 		if word != 0 {
 			return true
 		}
@@ -100,62 +74,66 @@ func (m Mask) Any() bool {
 // All reports whether every row is selected. It reports true for an empty
 // Mask.
 func (m Mask) All() bool {
-	fullWords := m.n / bitsPerWord
-	for _, word := range m.bits[:fullWords] {
+	words := bitmap.Bitmap(m).AlignedWords()
+	fullWords := m.Len() / bitsPerWord
+	for _, word := range words[:fullWords] {
 		if word != ^uint64(0) {
 			return false
 		}
 	}
 
-	remainder := m.n % bitsPerWord
-	if remainder == 0 {
-		return true
-	}
-	return m.bits[fullWords] == (uint64(1)<<remainder)-1
+	remainder := m.Len() % bitsPerWord
+	return remainder == 0 || words[fullWords] == uint64(1)<<remainder-1
 }
 
 // And returns the intersection of m and other. It panics on length mismatch.
 func (m Mask) And(other Mask) Mask {
-	if m.n != other.n {
+	if m.Len() != other.Len() {
 		panic("mask: length mismatch")
 	}
-
-	result := None(m.n)
-	for i, word := range m.bits {
-		result.bits[i] = word & other.bits[i]
+	leftWords := bitmap.Bitmap(m).AlignedWords()
+	rightWords := bitmap.Bitmap(other).AlignedWords()
+	result := bitmap.New(m.Len())
+	resultWords := result.AlignedWords()
+	for i, word := range leftWords {
+		resultWords[i] = word & rightWords[i]
 	}
-	return result
+	return Mask(result)
 }
 
 // Or returns the union of m and other. It panics on length mismatch.
 func (m Mask) Or(other Mask) Mask {
-	if m.n != other.n {
+	if m.Len() != other.Len() {
 		panic("mask: length mismatch")
 	}
-
-	result := None(m.n)
-	for i, word := range m.bits {
-		result.bits[i] = word | other.bits[i]
+	leftWords := bitmap.Bitmap(m).AlignedWords()
+	rightWords := bitmap.Bitmap(other).AlignedWords()
+	result := bitmap.New(m.Len())
+	resultWords := result.AlignedWords()
+	for i, word := range leftWords {
+		resultWords[i] = word | rightWords[i]
 	}
-	return result
+	return Mask(result)
 }
 
 // Not returns the complement of m.
 func (m Mask) Not() Mask {
-	result := None(m.n)
-	for i, word := range m.bits {
-		result.bits[i] = ^word
+	result := bitmap.New(m.Len())
+	resultWords := result.AlignedWords()
+	for i, word := range bitmap.Bitmap(m).AlignedWords() {
+		resultWords[i] = ^word
 	}
-	if remainder := m.n % bitsPerWord; remainder != 0 {
-		result.bits[len(result.bits)-1] &= (uint64(1) << remainder) - 1
+	if remainder := m.Len() % bitsPerWord; remainder != 0 {
+		resultWords[len(resultWords)-1] &= uint64(1)<<remainder - 1
 	}
-	return result
+	return Mask(result)
 }
 
 // Rows iterates selected row indexes in ascending order.
 func (m Mask) Rows() iter.Seq[int] {
+	words := bitmap.Bitmap(m).AlignedWords()
 	return func(yield func(int) bool) {
-		for wordIndex, word := range m.bits {
+		for wordIndex, word := range words {
 			for word != 0 {
 				bit := bits.TrailingZeros64(word)
 				if !yield(wordIndex*bitsPerWord + bit) {

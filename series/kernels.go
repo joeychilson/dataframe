@@ -113,7 +113,7 @@ func Between[T cmp.Ordered](s Series[T], lo, hi T) mask.Mask {
 		panic("series: Between: upper bound is less than lower bound")
 	}
 	return mask.NewFunc(s.Len(), func(i int) bool {
-		return (s.validity == nil || s.validity[i]) && lo <= s.values[i] && s.values[i] <= hi
+		return (!s.validity.Initialized() || s.validity.At(i)) && lo <= s.values[i] && s.values[i] <= hi
 	})
 }
 
@@ -127,7 +127,7 @@ func In[T comparable](s Series[T], values ...T) mask.Mask {
 		set[value] = struct{}{}
 	}
 	return mask.NewFunc(s.Len(), func(i int) bool {
-		if s.validity != nil && !s.validity[i] {
+		if s.validity.Initialized() && !s.validity.At(i) {
 			return false
 		}
 		_, ok := set[s.values[i]]
@@ -144,7 +144,7 @@ func InUsing[T any](s Series[T], hasher maphash.Hasher[T], values ...T) mask.Mas
 		set.Set(value, struct{}{})
 	}
 	return mask.NewFunc(s.Len(), func(i int) bool {
-		if s.validity != nil && !s.validity[i] {
+		if s.validity.Initialized() && !s.validity.At(i) {
 			return false
 		}
 		_, ok := set.Get(s.values[i])
@@ -155,7 +155,7 @@ func InUsing[T any](s Series[T], hasher maphash.Hasher[T], values ...T) mask.Mas
 // IsNaN selects present NaN values.
 func IsNaN[T Float](s Series[T]) mask.Mask {
 	return mask.NewFunc(s.Len(), func(i int) bool {
-		return (s.validity == nil || s.validity[i]) && s.values[i] != s.values[i]
+		return (!s.validity.Initialized() || s.validity.At(i)) && s.values[i] != s.values[i]
 	})
 }
 
@@ -273,7 +273,7 @@ func ArgMin[T cmp.Ordered](s Series[T]) (int, bool) {
 	var minimum T
 	found := false
 	for i, value := range s.values {
-		if s.validity != nil && !s.validity[i] {
+		if s.validity.Initialized() && !s.validity.At(i) {
 			continue
 		}
 		if !found || (value != value && minimum == minimum) || (minimum == minimum && value < minimum) {
@@ -293,7 +293,7 @@ func ArgMax[T cmp.Ordered](s Series[T]) (int, bool) {
 	var maximum T
 	found := false
 	for i, value := range s.values {
-		if s.validity != nil && !s.validity[i] {
+		if s.validity.Initialized() && !s.validity.At(i) {
 			continue
 		}
 		if !found || (value != value && maximum == maximum) || (maximum == maximum && value > maximum) {
@@ -312,7 +312,7 @@ func SampleVariance[T Real](s Series[T]) (float64, bool) {
 	mean := 0.0
 	sumSquares := 0.0
 	for i, value := range s.values {
-		if s.validity != nil && !s.validity[i] {
+		if s.validity.Initialized() && !s.validity.At(i) {
 			continue
 		}
 		count++
@@ -345,7 +345,7 @@ func Quantile[T Real](s Series[T], q float64) (float64, bool) {
 	}
 	values := make([]float64, 0, s.Len()-s.NullCount())
 	for i, value := range s.values {
-		if s.validity != nil && !s.validity[i] {
+		if s.validity.Initialized() && !s.validity.At(i) {
 			continue
 		}
 		converted := float64(value)
@@ -395,14 +395,14 @@ func matchRows[T any](a, b Series[T], lengthMismatch string, predicate func(T, T
 		panic(lengthMismatch)
 	}
 	return mask.NewFunc(a.Len(), func(i int) bool {
-		return (a.validity == nil || a.validity[i]) &&
-			(b.validity == nil || b.validity[i]) &&
+		return (!a.validity.Initialized() || a.validity.At(i)) &&
+			(!b.validity.Initialized() || b.validity.At(i)) &&
 			predicate(a.values[i], b.values[i])
 	})
 }
 
 func matchValue[T any](s Series[T], predicate func(T) bool) mask.Mask {
 	return mask.NewFunc(s.Len(), func(i int) bool {
-		return (s.validity == nil || s.validity[i]) && predicate(s.values[i])
+		return (!s.validity.Initialized() || s.validity.At(i)) && predicate(s.values[i])
 	})
 }

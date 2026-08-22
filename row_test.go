@@ -232,12 +232,13 @@ func TestEmptyRecordRetainsRows(t *testing.T) {
 }
 
 func TestRecordBackedFrameOperations(t *testing.T) {
+	type name string
 	type record struct {
 		ID   int
-		Name *string
+		Name *name
 	}
-	a := "a"
-	b := "b"
+	a := name("a")
+	b := name("b")
 	frame, err := FromRecords([]record{{ID: 1, Name: &a}, {ID: 2}, {ID: 3, Name: &b}})
 	if err != nil {
 		t.Fatal(err)
@@ -251,14 +252,15 @@ func TestRecordBackedFrameOperations(t *testing.T) {
 		t.Fatal(err)
 	}
 	tests := []struct {
-		name  string
-		frame Frame
-		ids   []int
+		name     string
+		frame    Frame
+		ids      []int
+		presence []bool
 	}{
-		{name: "Take", frame: taken, ids: []int{3, 1}},
-		{name: "Slice", frame: sliced, ids: []int{2, 3}},
-		{name: "Filter", frame: filtered, ids: []int{1, 3}},
-		{name: "Concat", frame: concatenated, ids: []int{3, 1, 1, 3}},
+		{name: "Take", frame: taken, ids: []int{3, 1}, presence: []bool{true, true}},
+		{name: "Slice", frame: sliced, ids: []int{2, 3}, presence: []bool{false, true}},
+		{name: "Filter", frame: filtered, ids: []int{1, 3}, presence: []bool{true, true}},
+		{name: "Concat", frame: concatenated, ids: []int{3, 1, 1, 3}, presence: []bool{true, true, true, true}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -275,6 +277,11 @@ func TestRecordBackedFrameOperations(t *testing.T) {
 			}
 			if len(records) != len(test.ids) {
 				t.Fatalf("record count = %d", len(records))
+			}
+			for i, record := range records {
+				if got := record.Name != nil; got != test.presence[i] {
+					t.Fatalf("record %d name presence = %t, want %t", i, got, test.presence[i])
+				}
 			}
 		})
 	}

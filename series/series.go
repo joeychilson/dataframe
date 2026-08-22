@@ -5,6 +5,7 @@ import (
 	"iter"
 	"slices"
 
+	"github.com/joeychilson/dataframe/internal/bitmap"
 	"github.com/joeychilson/dataframe/internal/reduce"
 	"github.com/joeychilson/dataframe/mask"
 )
@@ -18,7 +19,7 @@ import (
 // are responsible for synchronizing any mutation of those values.
 type Series[T any] struct {
 	values   []T
-	validity []bool
+	validity bitmap.Bitmap
 }
 
 // New returns a non-null Series containing a copy of values.
@@ -35,14 +36,9 @@ func NewNullable[T any](values []T, valid []bool) (Series[T], error) {
 		return Series[T]{}, fmt.Errorf("%w: got %d validity entries for %d values", ErrLengthMismatch, len(valid), len(values))
 	}
 
-	// Allocate even at length zero so the nullable schema does not collapse
-	// into the nil validity representation used by non-null Series.
-	validity := make([]bool, len(valid))
-	copy(validity, valid)
-
 	return Series[T]{
 		values:   slices.Clip(slices.Clone(values)),
-		validity: validity,
+		validity: bitmap.FromBools(valid),
 	}, nil
 }
 
@@ -50,11 +46,11 @@ func NewNullable[T any](values []T, valid []bool) (Series[T], error) {
 // cells. The result remains nullable when values is empty or contains no nulls.
 func FromOptionals[T any](values []Optional[T]) Series[T] {
 	physical := make([]T, len(values))
-	validity := make([]bool, len(values))
+	validity := bitmap.New(len(values))
 	for i, value := range values {
 		if value.Valid {
 			physical[i] = value.Value
-			validity[i] = true
+			validity.Set(i, true)
 		}
 	}
 	return Series[T]{values: physical, validity: validity}
@@ -76,24 +72,21 @@ func (s Series[T]) Len() int {
 // Series is empty or every row is present. Use NullCount to determine whether
 // the Series currently contains any null rows.
 func (s Series[T]) Nullable() bool {
-	return s.validity != nil
+	return s.validity.Initialized()
 }
 
 // NullCount returns the number of null rows.
 func (s Series[T]) NullCount() int {
-	count := 0
-	for _, valid := range s.validity {
-		if !valid {
-			count++
-		}
+	if !s.validity.Initialized() {
+		return 0
 	}
-	return count
+	return s.Len() - s.validity.Count()
 }
 
 // IsValid reports whether row i is present. It panics when i is out of range.
 func (s Series[T]) IsValid(i int) bool {
 	_ = s.values[i]
-	return s.validity == nil || s.validity[i]
+	return !s.validity.Initialized() || s.validity.At(i)
 }
 
 // At returns row i and whether it is present. A null row returns the zero value
@@ -101,7 +94,7 @@ func (s Series[T]) IsValid(i int) bool {
 // indexing.
 func (s Series[T]) At(i int) (T, bool) {
 	value := s.values[i]
-	if s.validity != nil && !s.validity[i] {
+	if s.validity.Initialized() && !s.validity.At(i) {
 		var zero T
 		return zero, false
 	}
@@ -112,7 +105,7 @@ func (s Series[T]) At(i int) (T, bool) {
 // when i is out of range; bounds errors are not treated as nulls.
 func (s Series[T]) ValueOr(i int, fallback T) T {
 	value := s.values[i]
-	if s.validity != nil && !s.validity[i] {
+	if s.validity.Initialized() && !s.validity.At(i) {
 		return fallback
 	}
 	return value
@@ -138,8 +131,8 @@ func (s Series[T]) Values() []T {
 // Validity returns one boolean per row, where true means present. The returned
 // slice is a copy. A non-null Series returns an all-true slice.
 func (s Series[T]) Validity() []bool {
-	if s.validity != nil {
-		return slices.Clone(s.validity)
+	if s.validity.Initialized() {
+		return s.validity.Bools()
 	}
 
 	return slices.Repeat([]bool{true}, len(s.values))
@@ -150,7 +143,7 @@ func (s Series[T]) Validity() []bool {
 func (s Series[T]) Optionals() []Optional[T] {
 	values := make([]Optional[T], len(s.values))
 	for i, value := range s.values {
-		if s.validity == nil || s.validity[i] {
+		if !s.validity.Initialized() || s.validity.At(i) {
 			values[i] = Some(value)
 		}
 	}
@@ -162,7 +155,7 @@ func (s Series[T]) All() iter.Seq2[int, Optional[T]] {
 	return func(yield func(int, Optional[T]) bool) {
 		for i, value := range s.values {
 			cell := Optional[T]{}
-			if s.validity == nil || s.validity[i] {
+			if !s.validity.Initialized() || s.validity.At(i) {
 				cell = Some(value)
 			}
 			if !yield(i, cell) {
@@ -175,10 +168,15 @@ func (s Series[T]) All() iter.Seq2[int, Optional[T]] {
 // Present iterates non-null rows as their original index and value.
 func (s Series[T]) Present() iter.Seq2[int, T] {
 	return func(yield func(int, T) bool) {
-		for i, value := range s.values {
-			if s.validity != nil && !s.validity[i] {
-				continue
+		if s.validity.Initialized() {
+			for i := range s.validity.Rows() {
+				if !yield(i, s.values[i]) {
+					return
+				}
 			}
+			return
+		}
+		for i, value := range s.values {
 			if !yield(i, value) {
 				return
 			}
@@ -196,8 +194,8 @@ func (s Series[T]) EqualFunc(other Series[T], equal func(T, T) bool) bool {
 		return false
 	}
 	for i, value := range s.values {
-		valid := s.validity == nil || s.validity[i]
-		otherValid := other.validity == nil || other.validity[i]
+		valid := !s.validity.Initialized() || s.validity.At(i)
+		otherValid := !other.validity.Initialized() || other.validity.At(i)
 		if valid != otherValid {
 			return false
 		}
@@ -224,13 +222,13 @@ func (s Series[T]) Concat(others ...Series[T]) Series[T] {
 
 	maxInt := int(^uint(0) >> 1)
 	total := s.Len()
-	nullable := s.validity != nil
+	nullable := s.validity.Initialized()
 	for _, other := range others {
 		if other.Len() > maxInt-total {
 			panic("series: Concat: length out of range")
 		}
 		total += other.Len()
-		nullable = nullable || other.validity != nil
+		nullable = nullable || other.validity.Initialized()
 	}
 
 	result := Series[T]{values: make([]T, total)}
@@ -242,17 +240,14 @@ func (s Series[T]) Concat(others ...Series[T]) Series[T] {
 		return result
 	}
 
-	result.validity = make([]bool, total)
-	for i := range result.validity {
-		result.validity[i] = true
-	}
+	result.validity = bitmap.Filled(total)
 	offset = s.Len()
-	if s.validity != nil {
-		copy(result.validity, s.validity)
+	if s.validity.Initialized() {
+		result.validity.Copy(0, s.validity)
 	}
 	for _, other := range others {
-		if other.validity != nil {
-			copy(result.validity[offset:], other.validity)
+		if other.validity.Initialized() {
+			result.validity.Copy(offset, other.validity)
 		}
 		offset += other.Len()
 	}
@@ -263,18 +258,16 @@ func (s Series[T]) Concat(others ...Series[T]) Series[T] {
 // the result preserves s's nullable schema.
 func (s Series[T]) Map[U any](fn func(T) U) Series[U] {
 	result := Series[U]{values: make([]U, s.Len())}
-	if s.validity == nil {
+	if !s.validity.Initialized() {
 		for i, value := range s.values {
 			result.values[i] = fn(value)
 		}
 		return result
 	}
 
-	result.validity = slices.Clone(s.validity)
-	for i, value := range s.values {
-		if s.validity[i] {
-			result.values[i] = fn(value)
-		}
+	result.validity = s.validity.Clone()
+	for i := range s.validity.Rows() {
+		result.values[i] = fn(s.values[i])
 	}
 	return result
 }
@@ -285,17 +278,17 @@ func (s Series[T]) Map[U any](fn func(T) U) Series[U] {
 func (s Series[T]) MapCells[U any](fn func(Optional[T]) Optional[U]) Series[U] {
 	result := Series[U]{
 		values:   make([]U, s.Len()),
-		validity: make([]bool, s.Len()),
+		validity: bitmap.New(s.Len()),
 	}
 	for i, value := range s.values {
 		cell := Optional[T]{}
-		if s.validity == nil || s.validity[i] {
+		if !s.validity.Initialized() || s.validity.At(i) {
 			cell = Some(value)
 		}
 		mapped := fn(cell)
 		if mapped.Valid {
 			result.values[i] = mapped.Value
-			result.validity[i] = true
+			result.validity.Set(i, true)
 		}
 	}
 	return result
@@ -308,16 +301,13 @@ func (s Series[T]) MapCells[U any](fn func(Optional[T]) Optional[U]) Series[U] {
 func (s Series[T]) MapOptional[U any](fn func(T) (U, bool)) Series[U] {
 	result := Series[U]{
 		values:   make([]U, s.Len()),
-		validity: make([]bool, s.Len()),
+		validity: bitmap.New(s.Len()),
 	}
-	for i, value := range s.values {
-		if s.validity != nil && !s.validity[i] {
-			continue
-		}
+	for i, value := range s.Present() {
 		mapped, valid := fn(value)
 		if valid {
 			result.values[i] = mapped
-			result.validity[i] = true
+			result.validity.Set(i, true)
 		}
 	}
 	return result
@@ -327,13 +317,10 @@ func (s Series[T]) MapOptional[U any](fn func(T) (U, bool)) Series[U] {
 // wraps it with the failing row index.
 func (s Series[T]) TryMap[U any](fn func(T) (U, error)) (Series[U], error) {
 	result := Series[U]{values: make([]U, s.Len())}
-	if s.validity != nil {
-		result.validity = slices.Clone(s.validity)
+	if s.validity.Initialized() {
+		result.validity = s.validity.Clone()
 	}
-	for i, value := range s.values {
-		if s.validity != nil && !s.validity[i] {
-			continue
-		}
+	for i, value := range s.Present() {
 		mapped, err := fn(value)
 		if err != nil {
 			return Series[U]{}, fmt.Errorf("series: TryMap: row %d: %w", i, err)
@@ -348,11 +335,11 @@ func (s Series[T]) TryMap[U any](fn func(T) (U, error)) (Series[U], error) {
 func (s Series[T]) TryMapCells[U any](fn func(Optional[T]) (Optional[U], error)) (Series[U], error) {
 	result := Series[U]{
 		values:   make([]U, s.Len()),
-		validity: make([]bool, s.Len()),
+		validity: bitmap.New(s.Len()),
 	}
 	for i, value := range s.values {
 		cell := Optional[T]{}
-		if s.validity == nil || s.validity[i] {
+		if !s.validity.Initialized() || s.validity.At(i) {
 			cell = Some(value)
 		}
 		mapped, err := fn(cell)
@@ -361,7 +348,7 @@ func (s Series[T]) TryMapCells[U any](fn func(Optional[T]) (Optional[U], error))
 		}
 		if mapped.Valid {
 			result.values[i] = mapped.Value
-			result.validity[i] = true
+			result.validity.Set(i, true)
 		}
 	}
 	return result, nil
@@ -375,10 +362,10 @@ func (s Series[T]) Map2[U, V any](other Series[U], fn func(T, U) V) Series[V] {
 	}
 	result := Series[V]{
 		values:   make([]V, s.Len()),
-		validity: combinedValidity(s.validity, other.validity, s.Len()),
+		validity: combinedValidity(s.validity, other.validity),
 	}
 	for i, value := range s.values {
-		if result.validity == nil || result.validity[i] {
+		if !result.validity.Initialized() || result.validity.At(i) {
 			result.values[i] = fn(value, other.values[i])
 		}
 	}
@@ -393,21 +380,21 @@ func (s Series[T]) Map2Cells[U, V any](other Series[U], fn func(Optional[T], Opt
 	}
 	result := Series[V]{
 		values:   make([]V, s.Len()),
-		validity: make([]bool, s.Len()),
+		validity: bitmap.New(s.Len()),
 	}
 	for i, value := range s.values {
 		left := Optional[T]{}
-		if s.validity == nil || s.validity[i] {
+		if !s.validity.Initialized() || s.validity.At(i) {
 			left = Some(value)
 		}
 		right := Optional[U]{}
-		if other.validity == nil || other.validity[i] {
+		if !other.validity.Initialized() || other.validity.At(i) {
 			right = Some(other.values[i])
 		}
 		mapped := fn(left, right)
 		if mapped.Valid {
 			result.values[i] = mapped.Value
-			result.validity[i] = true
+			result.validity.Set(i, true)
 		}
 	}
 	return result
@@ -422,10 +409,10 @@ func (s Series[T]) TryMap2[U, V any](other Series[U], fn func(T, U) (V, error)) 
 	}
 	result := Series[V]{
 		values:   make([]V, s.Len()),
-		validity: combinedValidity(s.validity, other.validity, s.Len()),
+		validity: combinedValidity(s.validity, other.validity),
 	}
 	for i, value := range s.values {
-		if result.validity != nil && !result.validity[i] {
+		if result.validity.Initialized() && !result.validity.At(i) {
 			continue
 		}
 		mapped, err := fn(value, other.values[i])
@@ -446,15 +433,15 @@ func (s Series[T]) TryMap2Cells[U, V any](other Series[U], fn func(Optional[T], 
 	}
 	result := Series[V]{
 		values:   make([]V, s.Len()),
-		validity: make([]bool, s.Len()),
+		validity: bitmap.New(s.Len()),
 	}
 	for i, value := range s.values {
 		left := Optional[T]{}
-		if s.validity == nil || s.validity[i] {
+		if !s.validity.Initialized() || s.validity.At(i) {
 			left = Some(value)
 		}
 		right := Optional[U]{}
-		if other.validity == nil || other.validity[i] {
+		if !other.validity.Initialized() || other.validity.At(i) {
 			right = Some(other.values[i])
 		}
 		mapped, err := fn(left, right)
@@ -463,7 +450,7 @@ func (s Series[T]) TryMap2Cells[U, V any](other Series[U], fn func(Optional[T], 
 		}
 		if mapped.Valid {
 			result.values[i] = mapped.Value
-			result.validity[i] = true
+			result.validity.Set(i, true)
 		}
 	}
 	return result, nil
@@ -473,14 +460,11 @@ func (s Series[T]) TryMap2Cells[U, V any](other Series[U], fn func(Optional[T], 
 // accumulations. Null rows remain null and leave the accumulator unchanged.
 func (s Series[T]) Scan[R any](initial R, fn func(R, T) R) Series[R] {
 	result := Series[R]{values: make([]R, s.Len())}
-	if s.validity != nil {
-		result.validity = slices.Clone(s.validity)
+	if s.validity.Initialized() {
+		result.validity = s.validity.Clone()
 	}
 	accumulator := initial
-	for i, value := range s.values {
-		if s.validity != nil && !s.validity[i] {
-			continue
-		}
+	for i, value := range s.Present() {
 		accumulator = fn(accumulator, value)
 		result.values[i] = accumulator
 	}
@@ -490,10 +474,8 @@ func (s Series[T]) Scan[R any](initial R, fn func(R, T) R) Series[R] {
 // Reduce folds present values from left to right. Nulls are skipped.
 func (s Series[T]) Reduce[R any](initial R, fn func(R, T) R) R {
 	result := initial
-	for i, value := range s.values {
-		if s.validity == nil || s.validity[i] {
-			result = fn(result, value)
-		}
+	for _, value := range s.Present() {
+		result = fn(result, value)
 	}
 	return result
 }
@@ -505,7 +487,7 @@ func (s Series[T]) SortedFunc(compare func(T, T) int) Series[T] {
 	if s.Len() < 2 {
 		return s
 	}
-	if s.validity == nil {
+	if !s.validity.Initialized() {
 		values := slices.Clone(s.values)
 		slices.SortStableFunc(values, compare)
 		return Series[T]{values: values}
@@ -516,8 +498,8 @@ func (s Series[T]) SortedFunc(compare func(T, T) int) Series[T] {
 		rows[i] = i
 	}
 	slices.SortStableFunc(rows, func(left, right int) int {
-		leftValid := s.validity[left]
-		rightValid := s.validity[right]
+		leftValid := s.validity.At(left)
+		rightValid := s.validity.At(right)
 		switch {
 		case !leftValid && !rightValid:
 			return 0
@@ -539,16 +521,24 @@ func (s Series[T]) Filter(selection mask.Mask) Series[T] {
 		panic(fmt.Sprintf("series: Filter: length mismatch: series=%d mask=%d", s.Len(), selection.Len()))
 	}
 
-	result := Series[T]{values: make([]T, selection.Count())}
-	if s.validity != nil {
-		result.validity = make([]bool, len(result.values))
+	selected := selection.Count()
+	result := Series[T]{values: make([]T, selected)}
+	if selected == s.Len() {
+		copy(result.values, s.values)
+		if s.validity.Initialized() {
+			result.validity = s.validity.Clone()
+		}
+		return result
+	}
+	if s.validity.Initialized() {
+		result.validity = bitmap.New(selected)
 	}
 
 	i := 0
 	for row := range selection.Rows() {
 		result.values[i] = s.values[row]
-		if result.validity != nil {
-			result.validity[i] = s.validity[row]
+		if result.validity.Initialized() && s.validity.At(row) {
+			result.validity.Set(i, true)
 		}
 		i++
 	}
@@ -560,14 +550,14 @@ func (s Series[T]) Filter(selection mask.Mask) Series[T] {
 // Take panics on an invalid index.
 func (s Series[T]) Take(rows []int) Series[T] {
 	result := Series[T]{values: make([]T, len(rows))}
-	if s.validity != nil {
-		result.validity = make([]bool, len(rows))
+	if s.validity.Initialized() {
+		result.validity = bitmap.New(len(rows))
 	}
 
 	for i, row := range rows {
 		result.values[i] = s.values[row]
-		if result.validity != nil {
-			result.validity[i] = s.validity[row]
+		if result.validity.Initialized() && s.validity.At(row) {
+			result.validity.Set(i, true)
 		}
 	}
 	return result
@@ -580,14 +570,13 @@ func (s Series[T]) Take(rows []int) Series[T] {
 func (s Series[T]) TakeNullable(rows Series[int]) Series[T] {
 	result := Series[T]{
 		values:   make([]T, rows.Len()),
-		validity: make([]bool, rows.Len()),
+		validity: bitmap.New(rows.Len()),
 	}
-	for i, row := range rows.values {
-		if rows.validity != nil && !rows.validity[i] {
-			continue
-		}
+	for i, row := range rows.Present() {
 		result.values[i] = s.values[row]
-		result.validity[i] = s.validity == nil || s.validity[row]
+		if !s.validity.Initialized() || s.validity.At(row) {
+			result.validity.Set(i, true)
+		}
 	}
 	return result
 }
@@ -616,15 +605,15 @@ func (s Series[T]) Tail(n int) Series[T] {
 // like slicing a Go slice.
 func (s Series[T]) Slice(start, end int) Series[T] {
 	result := Series[T]{values: s.values[start:end:end]}
-	if s.validity != nil {
-		result.validity = s.validity[start:end:end]
+	if s.validity.Initialized() {
+		result.validity = s.validity.Slice(start, end)
 	}
 	return result
 }
 
 // IsNull returns a Mask with the same length as s that selects its null rows.
 func (s Series[T]) IsNull() mask.Mask {
-	if s.validity == nil {
+	if !s.validity.Initialized() {
 		return mask.None(s.Len())
 	}
 	nullCount := s.NullCount()
@@ -634,13 +623,13 @@ func (s Series[T]) IsNull() mask.Mask {
 	if nullCount == s.Len() {
 		return mask.All(s.Len())
 	}
-	return mask.NewFunc(s.Len(), func(i int) bool { return !s.validity[i] })
+	return mask.Mask(s.validity.Not())
 }
 
 // IsNotNull returns a Mask with the same length as s that selects its present
 // rows.
 func (s Series[T]) IsNotNull() mask.Mask {
-	if s.validity == nil {
+	if !s.validity.Initialized() {
 		return mask.All(s.Len())
 	}
 	nullCount := s.NullCount()
@@ -650,13 +639,15 @@ func (s Series[T]) IsNotNull() mask.Mask {
 	if nullCount == s.Len() {
 		return mask.None(s.Len())
 	}
-	return mask.New(s.validity)
+	// Clone normalizes a sliced validity view to Mask's aligned storage
+	// invariant while keeping the returned value independent.
+	return mask.Mask(s.validity.Clone())
 }
 
 // FillNull replaces null rows with value and returns a non-null Series. When s
 // contains no null rows, the result shares value storage with s.
 func (s Series[T]) FillNull(value T) Series[T] {
-	if s.validity == nil {
+	if !s.validity.Initialized() {
 		return s
 	}
 
@@ -669,10 +660,8 @@ func (s Series[T]) FillNull(value T) Series[T] {
 	}
 
 	values := slices.Clip(slices.Clone(s.values))
-	for i, valid := range s.validity {
-		if !valid {
-			values[i] = value
-		}
+	for i := range s.validity.UnsetRows() {
+		values[i] = value
 	}
 	return Series[T]{values: values}
 }
@@ -680,7 +669,7 @@ func (s Series[T]) FillNull(value T) Series[T] {
 // DropNull returns the present rows as a non-null Series. When s contains no
 // null rows, the result shares value storage with s.
 func (s Series[T]) DropNull() Series[T] {
-	if s.validity == nil {
+	if !s.validity.Initialized() {
 		return s
 	}
 
@@ -693,21 +682,21 @@ func (s Series[T]) DropNull() Series[T] {
 	}
 
 	values := make([]T, 0, s.Len()-nullCount)
-	for i, value := range s.values {
-		if s.validity[i] {
-			values = append(values, value)
-		}
+	for _, value := range s.Present() {
+		values = append(values, value)
 	}
 	return Series[T]{values: values}
 }
 
-func combinedValidity(left, right []bool, length int) []bool {
-	if left == nil && right == nil {
-		return nil
+func combinedValidity(left, right bitmap.Bitmap) bitmap.Bitmap {
+	switch {
+	case !left.Initialized() && !right.Initialized():
+		return bitmap.Bitmap{}
+	case !left.Initialized():
+		return right.Clone()
+	case !right.Initialized():
+		return left.Clone()
+	default:
+		return left.And(right)
 	}
-	validity := make([]bool, length)
-	for i := range validity {
-		validity[i] = (left == nil || left[i]) && (right == nil || right[i])
-	}
-	return validity
 }

@@ -671,11 +671,21 @@ func TestSlice(t *testing.T) {
 	if !sliced.Nullable() {
 		t.Fatal("Slice() removed nullable schema")
 	}
-	if &sliced.values[0] != &source.values[1] || &sliced.validity[0] != &source.validity[1] {
-		t.Fatal("Slice() did not share source storage")
+	if got := slices.Collect(sliced.IsNull().Rows()); !slices.Equal(got, []int{0}) {
+		t.Fatalf("Slice().IsNull() rows = %v, want [0]", got)
 	}
-	if cap(sliced.values) != sliced.Len() || cap(sliced.validity) != sliced.Len() {
-		t.Fatal("Slice() result can extend into adjacent source rows")
+	if got := slices.Collect(sliced.IsNotNull().Rows()); !slices.Equal(got, []int{1}) {
+		t.Fatalf("Slice().IsNotNull() rows = %v, want [1]", got)
+	}
+	if &sliced.values[0] != &source.values[1] {
+		t.Fatal("Slice() did not share value storage")
+	}
+	source.validity.Set(2, false)
+	if sliced.IsValid(1) {
+		t.Fatal("Slice() did not share validity storage")
+	}
+	if cap(sliced.values) != sliced.Len() {
+		t.Fatal("Slice() values can extend into adjacent source rows")
 	}
 
 	empty := source.Slice(2, 2)

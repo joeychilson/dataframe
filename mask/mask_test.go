@@ -38,17 +38,6 @@ func TestNew(t *testing.T) {
 				}
 			}
 
-			wantWords := length / bitsPerWord
-			if length%bitsPerWord != 0 {
-				wantWords++
-			}
-			if len(m.bits) != wantWords {
-				t.Fatalf("stored words = %d, want %d", len(m.bits), wantWords)
-			}
-			if remainder := length % bitsPerWord; remainder != 0 && m.bits[len(m.bits)-1]>>remainder != 0 {
-				t.Fatal("unused bits in final word are set")
-			}
-
 			if length != 0 {
 				selected[0] = false
 				if !m.At(0) {
@@ -76,9 +65,6 @@ func TestNewFunc(t *testing.T) {
 	}
 	if rows := slices.Collect(m.Rows()); !slices.Equal(rows, []int{0, 64}) {
 		t.Fatalf("NewFunc() rows = %v, want [0 64]", rows)
-	}
-	if m.bits[len(m.bits)-1]>>1 != 0 {
-		t.Fatal("NewFunc() left unused bits set")
 	}
 }
 
@@ -139,9 +125,6 @@ func TestAllAndNone(t *testing.T) {
 				if none.At(i) {
 					t.Fatalf("None(%d).At(%d) = true", length, i)
 				}
-			}
-			if remainder := length % bitsPerWord; remainder != 0 && all.bits[len(all.bits)-1]>>remainder != 0 {
-				t.Fatal("All left unused bits set")
 			}
 		})
 	}
@@ -241,16 +224,21 @@ func TestLogicalOperations(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			wantCount := 0
 			if test.result.Len() != len(leftValues) {
 				t.Fatalf("Len() = %d, want %d", test.result.Len(), len(leftValues))
 			}
 			for i := range leftValues {
-				if got, want := test.result.At(i), test.want(i); got != want {
+				want := test.want(i)
+				if want {
+					wantCount++
+				}
+				if got := test.result.At(i); got != want {
 					t.Fatalf("At(%d) = %t, want %t", i, got, want)
 				}
 			}
-			if test.result.bits[len(test.result.bits)-1]>>1 != 0 {
-				t.Fatal("unused bits in final word are set")
+			if got := test.result.Count(); got != wantCount {
+				t.Fatalf("Count() = %d, want %d", got, wantCount)
 			}
 		})
 	}

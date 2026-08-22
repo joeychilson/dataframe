@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"iter"
 	"reflect"
-	"slices"
 
+	"github.com/joeychilson/dataframe/internal/bitmap"
 	"github.com/joeychilson/dataframe/mask"
 	"github.com/joeychilson/dataframe/series"
 )
@@ -108,12 +108,15 @@ func columnFromSlice(name string, values reflect.Value, validity []bool) ColumnS
 	case []complex128:
 		return typedColumnFromSlice(name, typed, validity)
 	default:
-		return reflectColumnSpec{
-			name:     name,
-			typeOf:   values.Type().Elem(),
-			values:   values,
-			validity: validity,
+		column := reflectColumnSpec{
+			name:   name,
+			typeOf: values.Type().Elem(),
+			values: values,
 		}
+		if validity != nil {
+			column.validity = bitmap.FromBools(validity)
+		}
+		return column
 	}
 }
 
@@ -132,7 +135,7 @@ type reflectColumnSpec struct {
 	name     string
 	typeOf   reflect.Type
 	values   reflect.Value
-	validity []bool
+	validity bitmap.Bitmap
 }
 
 func (c reflectColumnSpec) dataframeColumnSpec() {}
@@ -146,7 +149,7 @@ func (c reflectColumnSpec) columnType() reflect.Type {
 }
 
 func (c reflectColumnSpec) columnNullable() bool {
-	return c.validity != nil
+	return c.validity.Initialized()
 }
 
 func (c reflectColumnSpec) columnLen() int {
@@ -155,7 +158,7 @@ func (c reflectColumnSpec) columnLen() int {
 
 func (c reflectColumnSpec) columnAt(i int) (any, bool) {
 	value := c.values.Index(i)
-	if c.validity != nil && !c.validity[i] {
+	if c.validity.Initialized() && !c.validity.At(i) {
 		return nil, false
 	}
 	return value.Interface(), true
@@ -168,14 +171,14 @@ func (c reflectColumnSpec) columnRename(name string) ColumnSpec {
 
 func (c reflectColumnSpec) columnTake(rows []int) ColumnSpec {
 	values := reflect.MakeSlice(reflect.SliceOf(c.typeOf), len(rows), len(rows))
-	var validity []bool
-	if c.validity != nil {
-		validity = make([]bool, len(rows))
+	var validity bitmap.Bitmap
+	if c.validity.Initialized() {
+		validity = bitmap.New(len(rows))
 	}
 	for i, row := range rows {
 		values.Index(i).Set(c.values.Index(row))
-		if validity != nil {
-			validity[i] = c.validity[row]
+		if validity.Initialized() && c.validity.At(row) {
+			validity.Set(i, true)
 		}
 	}
 	return reflectColumnSpec{name: c.name, typeOf: c.typeOf, values: values, validity: validity}
@@ -183,14 +186,16 @@ func (c reflectColumnSpec) columnTake(rows []int) ColumnSpec {
 
 func (c reflectColumnSpec) columnTakeNullable(rows series.Series[int]) ColumnSpec {
 	values := reflect.MakeSlice(reflect.SliceOf(c.typeOf), rows.Len(), rows.Len())
-	validity := make([]bool, rows.Len())
+	validity := bitmap.New(rows.Len())
 	for i := 0; i < rows.Len(); i++ {
 		row, present := rows.At(i)
 		if !present {
 			continue
 		}
 		values.Index(i).Set(c.values.Index(row))
-		validity[i] = c.validity == nil || c.validity[row]
+		if !c.validity.Initialized() || c.validity.At(row) {
+			validity.Set(i, true)
+		}
 	}
 	return reflectColumnSpec{name: c.name, typeOf: c.typeOf, values: values, validity: validity}
 }
@@ -201,23 +206,23 @@ func (c reflectColumnSpec) columnSlice(start, end int) ColumnSpec {
 		typeOf: c.typeOf,
 		values: c.values.Slice3(start, end, end),
 	}
-	if c.validity != nil {
-		result.validity = c.validity[start:end:end]
+	if c.validity.Initialized() {
+		result.validity = c.validity.Slice(start, end)
 	}
 	return result
 }
 
 func (c reflectColumnSpec) columnFilter(selection mask.Mask) ColumnSpec {
 	values := reflect.MakeSlice(reflect.SliceOf(c.typeOf), selection.Count(), selection.Count())
-	var validity []bool
-	if c.validity != nil {
-		validity = make([]bool, values.Len())
+	var validity bitmap.Bitmap
+	if c.validity.Initialized() {
+		validity = bitmap.New(values.Len())
 	}
 	i := 0
 	for row := range selection.Rows() {
 		values.Index(i).Set(c.values.Index(row))
-		if validity != nil {
-			validity[i] = c.validity[row]
+		if validity.Initialized() && c.validity.At(row) {
+			validity.Set(i, true)
 		}
 		i++
 	}
@@ -240,9 +245,9 @@ func (c reflectColumnSpec) columnConcat(others []ColumnSpec) (ColumnSpec, error)
 	}
 
 	values := reflect.MakeSlice(reflect.SliceOf(c.typeOf), total, total)
-	var validity []bool
+	var validity bitmap.Bitmap
 	if nullable {
-		validity = slices.Repeat([]bool{true}, total)
+		validity = bitmap.Filled(total)
 	}
 	all := make([]ColumnSpec, 0, len(others)+1)
 	all = append(all, c)
@@ -254,8 +259,8 @@ func (c reflectColumnSpec) columnConcat(others []ColumnSpec) (ColumnSpec, error)
 			if present && value != nil {
 				values.Index(offset + row).Set(reflect.ValueOf(value))
 			}
-			if validity != nil {
-				validity[offset+row] = present
+			if validity.Initialized() && !present {
+				validity.Set(offset+row, false)
 			}
 		}
 		offset += column.columnLen()

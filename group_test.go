@@ -3,6 +3,7 @@ package dataframe
 import (
 	"errors"
 	"hash/maphash"
+	"math"
 	"reflect"
 	"slices"
 	"testing"
@@ -165,6 +166,151 @@ func TestGroupedOperationsPanicOnLengthMismatch(t *testing.T) {
 	if !errors.Is(err, ErrRowCount) {
 		t.Fatalf("TryMap() length error = %v, want ErrRowCount", err)
 	}
+}
+
+func FuzzGroupingAgainstMapModel(f *testing.F) {
+	f.Add([]byte{3, 0, 5, 3, 0, 7}, []byte{5, 0, 9, 17, 0, 3})
+	f.Add([]byte{}, []byte{})
+	f.Fuzz(func(t *testing.T, keyData, valueData []byte) {
+		keyData = keyData[:min(len(keyData), 64)]
+		keys := make([]series.Optional[int], len(keyData))
+		values := make([]series.Optional[int], len(keyData))
+		for i, value := range keyData {
+			if value&1 != 0 {
+				keys[i] = series.Some(int(int8(value)) / 16)
+			}
+			if len(valueData) > 0 {
+				value = valueData[i%len(valueData)]
+			} else {
+				value = 0
+			}
+			if value&1 != 0 {
+				values[i] = series.Some(int(int8(value)) / 2)
+			}
+		}
+
+		rows := make([]int, len(keys))
+		for i := range rows {
+			rows[i] = i
+		}
+		frame, err := New(Column("row", rows))
+		if err != nil {
+			t.Fatal(err)
+		}
+		grouped := frame.GroupBy(series.FromOptionals(keys))
+
+		type groupModel struct {
+			key  series.Optional[int]
+			rows []int
+		}
+		var groups []groupModel
+		indexes := make(map[int]int)
+		nullIndex := -1
+		for row, key := range keys {
+			index := nullIndex
+			if key.Valid {
+				var found bool
+				index, found = indexes[key.Value]
+				if !found {
+					index = len(groups)
+					indexes[key.Value] = index
+					groups = append(groups, groupModel{key: key})
+				}
+			} else if index < 0 {
+				index = len(groups)
+				nullIndex = index
+				groups = append(groups, groupModel{})
+			}
+			groups[index].rows = append(groups[index].rows, row)
+		}
+
+		wantKeys := make([]series.Optional[int], len(groups))
+		wantSizes := make([]int, len(groups))
+		wantSum := make([]series.Optional[int], len(groups))
+		wantMean := make([]series.Optional[float64], len(groups))
+		wantMin := make([]series.Optional[int], len(groups))
+		wantMax := make([]series.Optional[int], len(groups))
+		wantCount := make([]int, len(groups))
+		wantFirst := make([]series.Optional[int], len(groups))
+		wantLast := make([]series.Optional[int], len(groups))
+		wantRows := make([][]int, len(groups))
+		for i, group := range groups {
+			wantKeys[i] = group.key
+			wantSizes[i] = len(group.rows)
+			wantRows[i] = group.rows
+			for _, row := range group.rows {
+				value := values[row]
+				if !value.Valid {
+					continue
+				}
+				if wantCount[i] == 0 {
+					wantFirst[i] = value
+					wantMin[i] = value
+					wantMax[i] = value
+				}
+				wantLast[i] = value
+				wantSum[i] = series.Some(wantSum[i].Value + value.Value)
+				wantMin[i].Value = min(wantMin[i].Value, value.Value)
+				wantMax[i].Value = max(wantMax[i].Value, value.Value)
+				wantCount[i]++
+			}
+			if wantCount[i] > 0 {
+				wantMean[i] = series.Some(float64(wantSum[i].Value) / float64(wantCount[i]))
+			}
+		}
+
+		if got := grouped.Keys().Optionals(); !slices.Equal(got, wantKeys) {
+			t.Fatalf("Keys() = %+v, want %+v", got, wantKeys)
+		}
+		if got := grouped.Sizes().Values(); !slices.Equal(got, wantSizes) {
+			t.Fatalf("Sizes() = %v, want %v", got, wantSizes)
+		}
+		var gotRows [][]int
+		for _, group := range grouped.Groups() {
+			column, err := group.Column[int]("row")
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotRows = append(gotRows, column.Values())
+		}
+		if len(gotRows) != len(wantRows) {
+			t.Fatalf("Groups() count = %d, want %d", len(gotRows), len(wantRows))
+		}
+		for i := range gotRows {
+			if !slices.Equal(gotRows[i], wantRows[i]) {
+				t.Fatalf("Groups() rows = %v, want %v", gotRows, wantRows)
+			}
+		}
+		groupValues := series.FromOptionals(values)
+		if got := grouped.Sum(groupValues).Optionals(); !slices.Equal(got, wantSum) {
+			t.Fatalf("Sum() = %+v, want %+v", got, wantSum)
+		}
+		if got := grouped.Mean(groupValues).Optionals(); len(got) != len(wantMean) {
+			t.Fatalf("Mean() length = %d, want %d", len(got), len(wantMean))
+		} else {
+			for i := range got {
+				tolerance := 1e-12 * max(1, math.Abs(wantMean[i].Value))
+				if got[i].Valid != wantMean[i].Valid || got[i].Valid && math.Abs(got[i].Value-wantMean[i].Value) > tolerance {
+					t.Fatalf("Mean() = %+v, want %+v", got, wantMean)
+				}
+			}
+		}
+		if got := grouped.Min(groupValues).Optionals(); !slices.Equal(got, wantMin) {
+			t.Fatalf("Min() = %+v, want %+v", got, wantMin)
+		}
+		if got := grouped.Max(groupValues).Optionals(); !slices.Equal(got, wantMax) {
+			t.Fatalf("Max() = %+v, want %+v", got, wantMax)
+		}
+		if got := grouped.Count(groupValues).Values(); !slices.Equal(got, wantCount) {
+			t.Fatalf("Count() = %v, want %v", got, wantCount)
+		}
+		if got := grouped.FirstPresent(groupValues).Optionals(); !slices.Equal(got, wantFirst) {
+			t.Fatalf("FirstPresent() = %+v, want %+v", got, wantFirst)
+		}
+		if got := grouped.LastPresent(groupValues).Optionals(); !slices.Equal(got, wantLast) {
+			t.Fatalf("LastPresent() = %+v, want %+v", got, wantLast)
+		}
+	})
 }
 
 func BenchmarkGroupBySum(b *testing.B) {

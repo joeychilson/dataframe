@@ -774,6 +774,89 @@ func TestNullMasks(t *testing.T) {
 	}
 }
 
+func FuzzRepresentationOperationsAgainstOptionals(f *testing.F) {
+	boundary := make([]byte, 130)
+	for i := range boundary {
+		boundary[i] = byte(i)
+	}
+	f.Add(boundary, []byte{0, 1, 64, 129}, boundary, boundary, uint16(1), uint16(129))
+	f.Add([]byte{}, []byte{}, []byte{}, []byte{}, uint16(0), uint16(0))
+
+	f.Fuzz(func(t *testing.T, data, rowData, filterData, otherData []byte, rawStart, rawEnd uint16) {
+		decode := func(data []byte) []Optional[int] {
+			data = data[:min(len(data), 130)]
+			values := make([]Optional[int], len(data))
+			for i, value := range data {
+				if value&1 != 0 {
+					values[i] = Some(int(int8(value)))
+				}
+			}
+			return values
+		}
+		assert := func(name string, got Series[int], want []Optional[int]) {
+			t.Helper()
+			if values := got.Optionals(); !slices.Equal(values, want) {
+				t.Fatalf("%s = %+v, want %+v", name, values, want)
+			}
+		}
+
+		model := decode(data)
+		values := FromOptionals(model)
+		start := int(rawStart) % (len(model) + 1)
+		end := int(rawEnd) % (len(model) + 1)
+		if start > end {
+			start, end = end, start
+		}
+		assert("Slice", values.Slice(start, end), model[start:end])
+
+		rowData = rowData[:min(len(rowData), 130)]
+		rows := make([]int, 0, len(rowData))
+		var wantTake []Optional[int]
+		if len(model) > 0 {
+			for _, value := range rowData {
+				row := int(value) % len(model)
+				rows = append(rows, row)
+				wantTake = append(wantTake, model[row])
+			}
+		}
+		assert("Take", values.Take(rows), wantTake)
+
+		nullableRows := make([]Optional[int], len(rowData))
+		wantNullable := make([]Optional[int], len(rowData))
+		for i, value := range rowData {
+			if len(model) > 0 && value&1 != 0 {
+				row := int(value>>1) % len(model)
+				nullableRows[i] = Some(row)
+				wantNullable[i] = model[row]
+			}
+		}
+		assert("TakeNullable", values.TakeNullable(FromOptionals(nullableRows)), wantNullable)
+
+		selected := make([]bool, len(model))
+		var wantFiltered []Optional[int]
+		for i := range selected {
+			selected[i] = i < len(filterData) && filterData[i]&1 != 0
+			if selected[i] {
+				wantFiltered = append(wantFiltered, model[i])
+			}
+		}
+		assert("Filter", values.Filter(mask.New(selected)), wantFiltered)
+
+		other := decode(otherData)
+		wantConcat := append(slices.Clone(model), other...)
+		assert("Concat", values.Concat(FromOptionals(other)), wantConcat)
+
+		nulls := values.IsNull()
+		present := values.IsNotNull()
+		for i, value := range model {
+			if nulls.At(i) != !value.Valid || present.At(i) != value.Valid {
+				t.Fatalf("null masks at %d = (%t, %t), want (%t, %t)", i, nulls.At(i), present.At(i), !value.Valid, value.Valid)
+			}
+		}
+		assert("source", values, model)
+	})
+}
+
 func BenchmarkNullMasks(b *testing.B) {
 	const length = 1 << 16
 	values := make([]int, length)

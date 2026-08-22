@@ -442,6 +442,45 @@ func TestMatchingRowsReturnRowCountError(t *testing.T) {
 	}
 }
 
+func FuzzJoinsAgainstNestedLoop(f *testing.F) {
+	f.Add([]byte{1, 3, 5, 5, 2}, []byte{5, 1, 7, 2})
+	f.Add([]byte{}, []byte{})
+	f.Fuzz(func(t *testing.T, leftData, rightData []byte) {
+		decode := func(data []byte) []series.Optional[float64] {
+			data = data[:min(len(data), 8)]
+			keys := make([]series.Optional[float64], len(data))
+			for i, value := range data {
+				if value&1 == 0 {
+					continue
+				}
+				var key float64
+				switch (value >> 1) % 5 {
+				case 0:
+					key = math.NaN()
+				case 1:
+					key = 0
+				case 2:
+					key = 1
+				case 3:
+					key = -1
+				default:
+					key = float64(int8(value)) / 4
+				}
+				keys[i] = series.Some(key)
+			}
+			return keys
+		}
+
+		left := decode(leftData)
+		right := decode(rightData)
+		assertJoinModel(t, left, right, On(series.FromOptionals(left), series.FromOptionals(right)), func(left, right float64) bool {
+			return left == right
+		})
+		hasher := fuzzFloatHasher{}
+		assertJoinModel(t, left, right, OnBy(series.FromOptionals(left), series.FromOptionals(right), hasher), hasher.Equal)
+	})
+}
+
 func BenchmarkInnerJoin(b *testing.B) {
 	const size = 10_000
 	keys := make([]int, size)
@@ -554,6 +593,150 @@ func assertJoinColumns(t *testing.T, frame Frame, wantKeys []series.Optional[int
 	if !reflect.DeepEqual(keys.Optionals(), wantKeys) || !reflect.DeepEqual(left.Optionals(), wantLeft) || !reflect.DeepEqual(right.Optionals(), wantRight) {
 		t.Fatalf("joined columns:\nkeys  = %#v\nleft  = %#v\nright = %#v", keys.Optionals(), left.Optionals(), right.Optionals())
 	}
+}
+
+type joinPair struct {
+	left  int
+	right int
+}
+
+func assertJoinModel(t *testing.T, leftKeys, rightKeys []series.Optional[float64], key JoinKey[float64], equal func(float64, float64) bool) {
+	t.Helper()
+	leftRows := make([]int, len(leftKeys))
+	for i := range leftRows {
+		leftRows[i] = i
+	}
+	rightRows := make([]int, len(rightKeys))
+	for i := range rightRows {
+		rightRows[i] = i
+	}
+	left, err := New(Column("left", leftRows))
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := New(Column("right", rightRows))
+	if err != nil {
+		t.Fatal(err)
+	}
+	operations := []struct {
+		name string
+		kind joinKind
+		join func(Frame, Frame, JoinKey[float64]) (Frame, error)
+	}{
+		{name: "InnerJoin", kind: innerJoin, join: func(left, right Frame, key JoinKey[float64]) (Frame, error) { return left.InnerJoin(right, key) }},
+		{name: "LeftJoin", kind: leftJoin, join: func(left, right Frame, key JoinKey[float64]) (Frame, error) { return left.LeftJoin(right, key) }},
+		{name: "RightJoin", kind: rightJoin, join: func(left, right Frame, key JoinKey[float64]) (Frame, error) { return left.RightJoin(right, key) }},
+		{name: "FullJoin", kind: fullJoin, join: func(left, right Frame, key JoinKey[float64]) (Frame, error) { return left.FullJoin(right, key) }},
+		{name: "SemiJoin", kind: semiJoin, join: func(left, right Frame, key JoinKey[float64]) (Frame, error) { return left.SemiJoin(right, key) }},
+		{name: "AntiJoin", kind: antiJoin, join: func(left, right Frame, key JoinKey[float64]) (Frame, error) { return left.AntiJoin(right, key) }},
+	}
+	for _, operation := range operations {
+		joined, err := operation.join(left, right, key)
+		if err != nil {
+			t.Fatalf("%s: %v", operation.name, err)
+		}
+		want := referenceJoinPairs(leftKeys, rightKeys, operation.kind, equal)
+		leftColumn, err := joined.Column[int]("left")
+		if err != nil {
+			t.Fatalf("%s left column: %v", operation.name, err)
+		}
+		if operation.kind == semiJoin || operation.kind == antiJoin {
+			got := leftColumn.Values()
+			wantRows := make([]int, len(want))
+			for i, pair := range want {
+				wantRows[i] = pair.left
+			}
+			if !slices.Equal(got, wantRows) {
+				t.Fatalf("%s rows = %v, want %v", operation.name, got, wantRows)
+			}
+			continue
+		}
+		rightColumn, err := joined.Column[int]("right")
+		if err != nil {
+			t.Fatalf("%s right column: %v", operation.name, err)
+		}
+		got := make([]joinPair, joined.Len())
+		for i := range got {
+			got[i].left, _ = leftColumn.At(i)
+			got[i].right, _ = rightColumn.At(i)
+			if !leftColumn.IsValid(i) {
+				got[i].left = -1
+			}
+			if !rightColumn.IsValid(i) {
+				got[i].right = -1
+			}
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("%s pairs = %v, want %v", operation.name, got, want)
+		}
+	}
+}
+
+func referenceJoinPairs(left, right []series.Optional[float64], kind joinKind, equal func(float64, float64) bool) []joinPair {
+	matches := func(leftRow, rightRow int) bool {
+		return left[leftRow].Valid && right[rightRow].Valid && equal(left[leftRow].Value, right[rightRow].Value)
+	}
+	var pairs []joinPair
+	if kind == rightJoin {
+		for rightRow := range right {
+			matched := false
+			for leftRow := range left {
+				if matches(leftRow, rightRow) {
+					pairs = append(pairs, joinPair{left: leftRow, right: rightRow})
+					matched = true
+				}
+			}
+			if !matched {
+				pairs = append(pairs, joinPair{left: -1, right: rightRow})
+			}
+		}
+		return pairs
+	}
+
+	matchedRight := make([]bool, len(right))
+	for leftRow := range left {
+		matched := false
+		for rightRow := range right {
+			if !matches(leftRow, rightRow) {
+				continue
+			}
+			matched = true
+			matchedRight[rightRow] = true
+			if kind == innerJoin || kind == leftJoin || kind == fullJoin {
+				pairs = append(pairs, joinPair{left: leftRow, right: rightRow})
+			}
+		}
+		switch {
+		case kind == semiJoin && matched, kind == antiJoin && !matched:
+			pairs = append(pairs, joinPair{left: leftRow, right: -1})
+		case (kind == leftJoin || kind == fullJoin) && !matched:
+			pairs = append(pairs, joinPair{left: leftRow, right: -1})
+		}
+	}
+	if kind == fullJoin {
+		for rightRow, matched := range matchedRight {
+			if !matched {
+				pairs = append(pairs, joinPair{left: -1, right: rightRow})
+			}
+		}
+	}
+	return pairs
+}
+
+type fuzzFloatHasher struct{}
+
+func (fuzzFloatHasher) Hash(hash *maphash.Hash, value float64) {
+	bits := math.Float64bits(value)
+	if math.IsNaN(value) {
+		bits = math.Float64bits(math.NaN())
+	} else if value == 0 {
+		bits = 0
+	}
+	maphash.WriteComparable(hash, bits)
+}
+
+func (fuzzFloatHasher) Equal(left, right float64) bool {
+	return left == right || math.IsNaN(left) && math.IsNaN(right)
 }
 
 type dereferencedIntHasher struct{}

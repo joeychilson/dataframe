@@ -151,6 +151,64 @@ func TestCopyOverlap(t *testing.T) {
 	}
 }
 
+func FuzzViewAndCopyAgainstBoolSlice(f *testing.F) {
+	boundary := make([]byte, 260)
+	for i := range boundary {
+		boundary[i] = byte(i)
+	}
+	f.Add(boundary, uint16(1), uint16(130), uint16(0), uint16(64), uint16(0), uint16(129))
+	f.Add(boundary, uint16(63), uint16(193), uint16(65), uint16(1), uint16(1), uint16(128))
+	f.Add([]byte{}, uint16(0), uint16(0), uint16(0), uint16(0), uint16(0), uint16(0))
+
+	f.Fuzz(func(t *testing.T, data []byte, rawStart, rawEnd, rawSource, rawDestination, rawView, rawLength uint16) {
+		data = data[:min(len(data), 260)]
+		values := make([]bool, len(data))
+		for i, value := range data {
+			values[i] = value&1 != 0
+		}
+
+		start := int(rawStart) % (len(values) + 1)
+		end := int(rawEnd) % (len(values) + 1)
+		if start > end {
+			start, end = end, start
+		}
+		view := FromBools(values).Slice(start, end)
+		wantView := values[start:end]
+		if got := view.Bools(); !slices.Equal(got, wantView) {
+			t.Fatalf("Slice(%d, %d) = %v, want %v", start, end, got, wantView)
+		}
+		var wantRows []int
+		for i, value := range wantView {
+			if value {
+				wantRows = append(wantRows, i)
+			}
+		}
+		if got := slices.Collect(view.Rows()); !slices.Equal(got, wantRows) {
+			t.Fatalf("Slice(%d, %d).Rows() = %v, want %v", start, end, got, wantRows)
+		}
+		if view.Count() != len(wantRows) || view.Any() != (len(wantRows) > 0) || view.All() != (len(wantRows) == len(wantView)) {
+			t.Fatalf("Slice(%d, %d) summary = Count:%d Any:%t All:%t", start, end, view.Count(), view.Any(), view.All())
+		}
+		if got := view.Clone().Bools(); !slices.Equal(got, wantView) {
+			t.Fatalf("Slice(%d, %d).Clone() = %v, want %v", start, end, got, wantView)
+		}
+
+		sourceStart := int(rawSource) % (len(values) + 1)
+		destinationStart := int(rawDestination) % (len(values) + 1)
+		viewStart := int(rawView) % (destinationStart + 1)
+		length := int(rawLength) % (min(len(values)-sourceStart, len(values)-destinationStart) + 1)
+		want := slices.Clone(values)
+		copy(want[destinationStart:destinationStart+length], want[sourceStart:sourceStart+length])
+		bitmap := FromBools(values)
+		destination := bitmap.Slice(viewStart, bitmap.Len())
+		source := bitmap.Slice(sourceStart, sourceStart+length)
+		destination.Copy(destinationStart-viewStart, source)
+		if got := bitmap.Bools(); !slices.Equal(got, want) {
+			t.Fatalf("Copy source [%d:%d] to %d through view %d = %v, want %v", sourceStart, sourceStart+length, destinationStart, viewStart, got, want)
+		}
+	})
+}
+
 func BenchmarkCopy(b *testing.B) {
 	const size = 1 << 16
 

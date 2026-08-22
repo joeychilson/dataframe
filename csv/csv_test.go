@@ -449,6 +449,51 @@ func TestWriterRejectsInvalidUnicodeDelimiter(t *testing.T) {
 	}
 }
 
+func FuzzRecordRoundTrip(f *testing.F) {
+	type record struct {
+		Appended  appendOnlyText
+		Both      textCode
+		Marshaled marshalTextCode
+		Name      *string
+		Score     series.Optional[int]
+	}
+	f.Add([]byte{0, 1, 2, 3, 7, 15, 31, 63, 127, 255})
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		data = data[:min(len(data), 32)]
+		labels := [...]string{"", "plain", "a,b", "a\"b", "line\nbreak"}
+		records := make([]record, len(data))
+		for i, value := range data {
+			records[i].Appended = appendOnlyText(labels[int(value)%len(labels)])
+			records[i].Both = textCode(int8(value))
+			records[i].Marshaled = marshalTextCode(int8(value))
+			if value&1 != 0 {
+				name := labels[int(value>>1)%len(labels)]
+				records[i].Name = &name
+			}
+			if value&2 != 0 {
+				records[i].Score = series.Some(int(int8(value)))
+			}
+		}
+
+		var output strings.Builder
+		writer := NewWriter(&output)
+		writer.NullString = "<NULL>"
+		if err := writer.WriteRecords(records); err != nil {
+			t.Fatal(err)
+		}
+		reader := NewReader(strings.NewReader(output.String()))
+		reader.NullValues = []string{"<NULL>"}
+		got, err := reader.ReadRecords[record]()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, records) {
+			t.Fatalf("round trip = %#v, want %#v\nCSV:\n%s", got, records, output.String())
+		}
+	})
+}
+
 func BenchmarkRead(b *testing.B) {
 	var input strings.Builder
 	input.WriteString("id,value\n")
@@ -567,4 +612,20 @@ type incrementingAppendCode int
 func (c *incrementingAppendCode) AppendText(buffer []byte) ([]byte, error) {
 	*c = *c + 1
 	return fmt.Appendf(buffer, "C%d", *c), nil
+}
+
+type marshalTextCode int
+
+func (c *marshalTextCode) UnmarshalText(text []byte) error {
+	value := strings.TrimPrefix(string(text), "M")
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return err
+	}
+	*c = marshalTextCode(parsed)
+	return nil
+}
+
+func (c marshalTextCode) MarshalText() ([]byte, error) {
+	return strconv.AppendInt([]byte{'M'}, int64(c), 10), nil
 }

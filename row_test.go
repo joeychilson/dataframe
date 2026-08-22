@@ -339,6 +339,63 @@ func TestConcatTypedAndReflectedColumns(t *testing.T) {
 	}
 }
 
+func FuzzRecordRoundTrip(f *testing.F) {
+	type recordID int16
+	type Metadata struct {
+		Active bool
+	}
+	type record struct {
+		Metadata
+		ID       recordID
+		Dynamic  any
+		Name     *string
+		Score    series.Optional[int]
+		Optional series.Optional[any]
+	}
+	f.Add([]byte{0, 1, 2, 3, 7, 15, 31, 63, 127, 255})
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		data = data[:min(len(data), 64)]
+		records := make([]record, len(data))
+		names := [...]string{"", "alpha", "beta"}
+		for i, value := range data {
+			records[i].Active = value&1 != 0
+			records[i].ID = recordID(int8(value))
+			switch (value >> 1) % 3 {
+			case 1:
+				records[i].Dynamic = int(int8(value))
+			case 2:
+				records[i].Dynamic = names[int(value)%len(names)]
+			}
+			if value&4 != 0 {
+				name := names[int(value>>2)%len(names)]
+				records[i].Name = &name
+			}
+			if value&8 != 0 {
+				records[i].Score = series.Some(int(int8(value)))
+			}
+			switch (value >> 4) % 3 {
+			case 1:
+				records[i].Optional = series.Some[any](nil)
+			case 2:
+				records[i].Optional = series.Some[any](names[int(value)%len(names)])
+			}
+		}
+
+		frame, err := FromRecords(records)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := frame.Records[record]()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, records) {
+			t.Fatalf("round trip = %#v, want %#v", got, records)
+		}
+	})
+}
+
 func BenchmarkFromRecords(b *testing.B) {
 	type record struct {
 		ID    int

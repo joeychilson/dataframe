@@ -240,15 +240,10 @@ func NewWriter(w io.Writer) *Writer {
 // control their text form. Unsupported element types return an error wrapping
 // dataframe.ErrUnsupported.
 func (w *Writer) Write(f dataframe.Frame) error {
-	if w == nil || w.output == nil {
-		return fmt.Errorf("csv: nil writer")
+	writer, err := w.configuredWriter()
+	if err != nil {
+		return err
 	}
-	if !validDelimiter(w.Comma) {
-		return fmt.Errorf("csv: invalid field or comment delimiter")
-	}
-	writer := stdcsv.NewWriter(w.output)
-	writer.Comma = w.Comma
-	writer.UseCRLF = w.UseCRLF
 	if w.Header {
 		if err := writer.Write(f.Names()); err != nil {
 			return err
@@ -282,11 +277,57 @@ func (w *Writer) Write(f dataframe.Frame) error {
 // write NullString. Values implementing encoding.TextMarshaler control their
 // text form.
 func (w *Writer) WriteRecords[T any](records []T) error {
-	frame, err := dataframe.FromRecords(records)
+	typeOf := reflect.TypeFor[T]()
+	fields, err := record.Describe(typeOf, dataframe.ErrInvalidRecord, dataframe.ErrInvalidName, dataframe.ErrColumnConflict)
 	if err != nil {
 		return err
 	}
-	return w.Write(frame)
+	writer, err := w.configuredWriter()
+	if err != nil {
+		return err
+	}
+	if w.Header {
+		header := make([]string, len(fields))
+		for i, field := range fields {
+			header[i] = field.Name
+		}
+		if err := writer.Write(header); err != nil {
+			return err
+		}
+	}
+
+	values := reflect.ValueOf(records)
+	encoded := make([]string, len(fields))
+	for row := range records {
+		value := values.Index(row)
+		for fieldIndex, field := range fields {
+			fieldValue := value.FieldByIndex(field.Index)
+			switch field.Kind {
+			case record.Pointer:
+				if fieldValue.IsNil() {
+					encoded[fieldIndex] = w.NullString
+					continue
+				}
+				fieldValue = fieldValue.Elem()
+			case record.Optional:
+				if !fieldValue.Field(1).Bool() {
+					encoded[fieldIndex] = w.NullString
+					continue
+				}
+				fieldValue = fieldValue.Field(0)
+			}
+			text, err := marshalReflectValue(fieldValue)
+			if err != nil {
+				return fmt.Errorf("csv: row %d column %q: %w", row, field.Name, err)
+			}
+			encoded[fieldIndex] = text
+		}
+		if err := writer.Write(encoded); err != nil {
+			return err
+		}
+	}
+	writer.Flush()
+	return writer.Error()
 }
 
 // Read parses CSV using NewReader's defaults.
@@ -297,6 +338,19 @@ func Read(r io.Reader) (dataframe.Frame, error) {
 // Write serializes f using NewWriter's defaults.
 func Write(w io.Writer, f dataframe.Frame) error {
 	return NewWriter(w).Write(f)
+}
+
+func (w *Writer) configuredWriter() (*stdcsv.Writer, error) {
+	if w == nil || w.output == nil {
+		return nil, fmt.Errorf("csv: nil writer")
+	}
+	if !validDelimiter(w.Comma) {
+		return nil, fmt.Errorf("csv: invalid field or comment delimiter")
+	}
+	writer := stdcsv.NewWriter(w.output)
+	writer.Comma = w.Comma
+	writer.UseCRLF = w.UseCRLF
+	return writer, nil
 }
 
 type inferredKind uint8
@@ -455,40 +509,50 @@ func unmarshalValue(destination reflect.Value, text string) error {
 }
 
 func marshalValue(value any) (string, error) {
-	if value == nil {
+	return marshalReflectValue(reflect.ValueOf(value))
+}
+
+func marshalReflectValue(value reflect.Value) (string, error) {
+	if !value.IsValid() {
 		return "", fmt.Errorf("%w: cannot encode a present nil interface", dataframe.ErrUnsupported)
 	}
-	valueOf := reflect.ValueOf(value)
-	textMarshaler := reflect.TypeFor[encoding.TextMarshaler]()
-	if valueOf.Type().Implements(textMarshaler) {
-		if valueOf.Kind() == reflect.Pointer && valueOf.IsNil() {
-			return "", fmt.Errorf("%w: cannot encode nil %v", dataframe.ErrUnsupported, valueOf.Type())
+	for value.Kind() == reflect.Interface {
+		if value.IsNil() {
+			return "", fmt.Errorf("%w: cannot encode a present nil interface", dataframe.ErrUnsupported)
 		}
-		text, err := valueOf.Interface().(encoding.TextMarshaler).MarshalText()
+		value = value.Elem()
+	}
+	textMarshaler := reflect.TypeFor[encoding.TextMarshaler]()
+	if value.Type().Implements(textMarshaler) {
+		if value.Kind() == reflect.Pointer && value.IsNil() {
+			return "", fmt.Errorf("%w: cannot encode nil %v", dataframe.ErrUnsupported, value.Type())
+		}
+		text, err := value.Interface().(encoding.TextMarshaler).MarshalText()
 		return string(text), err
 	}
-	pointer := reflect.New(valueOf.Type())
-	pointer.Elem().Set(valueOf)
-	if pointer.Type().Implements(textMarshaler) {
+	pointerType := reflect.PointerTo(value.Type())
+	if pointerType.Implements(textMarshaler) {
+		pointer := reflect.New(value.Type())
+		pointer.Elem().Set(value)
 		text, err := pointer.Interface().(encoding.TextMarshaler).MarshalText()
 		return string(text), err
 	}
 
-	switch valueOf.Kind() {
+	switch value.Kind() {
 	case reflect.String:
-		return valueOf.String(), nil
+		return value.String(), nil
 	case reflect.Bool:
-		return strconv.FormatBool(valueOf.Bool()), nil
+		return strconv.FormatBool(value.Bool()), nil
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return strconv.FormatInt(valueOf.Int(), 10), nil
+		return strconv.FormatInt(value.Int(), 10), nil
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-		return strconv.FormatUint(valueOf.Uint(), 10), nil
+		return strconv.FormatUint(value.Uint(), 10), nil
 	case reflect.Float32:
-		return strconv.FormatFloat(valueOf.Float(), 'g', -1, 32), nil
+		return strconv.FormatFloat(value.Float(), 'g', -1, 32), nil
 	case reflect.Float64:
-		return strconv.FormatFloat(valueOf.Float(), 'g', -1, 64), nil
+		return strconv.FormatFloat(value.Float(), 'g', -1, 64), nil
 	default:
-		return "", fmt.Errorf("%w: cannot encode %v", dataframe.ErrUnsupported, valueOf.Type())
+		return "", fmt.Errorf("%w: cannot encode %v", dataframe.ErrUnsupported, value.Type())
 	}
 }
 

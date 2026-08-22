@@ -189,6 +189,62 @@ func TestWriteRecordsAndTextMarshaler(t *testing.T) {
 	}
 }
 
+func TestWriteRecordsSchemaAndNulls(t *testing.T) {
+	type Metadata struct {
+		ID int `df:"id"`
+	}
+	type row struct {
+		Metadata
+		Name    series.Optional[string] `df:"name"`
+		Ignored string                  `df:"-"`
+	}
+	records := []row{
+		{Metadata: Metadata{ID: 1}, Name: series.Some("A")},
+		{Metadata: Metadata{ID: 2}},
+	}
+	var output strings.Builder
+	writer := NewWriter(&output)
+	writer.Comma = ';'
+	writer.UseCRLF = true
+	writer.NullString = "NULL"
+	if err := writer.WriteRecords(records); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := output.String(), "id;name\r\n1;A\r\n2;NULL\r\n"; got != want {
+		t.Fatalf("CSV = %q, want %q", got, want)
+	}
+
+	output.Reset()
+	if err := NewWriter(&output).WriteRecords([]row{}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := output.String(), "id,name\n"; got != want {
+		t.Fatalf("empty CSV = %q, want %q", got, want)
+	}
+	if err := (*Writer)(nil).WriteRecords([]int{}); !errors.Is(err, dataframe.ErrInvalidRecord) {
+		t.Fatalf("invalid record error = %v", err)
+	}
+}
+
+func TestWriteRecordsDoesNotMutateTextMarshaler(t *testing.T) {
+	type row struct {
+		Code incrementingTextCode `df:"code"`
+	}
+	records := []row{{Code: 7}}
+	var output strings.Builder
+	writer := NewWriter(&output)
+	writer.Header = false
+	if err := writer.WriteRecords(records); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := output.String(), "C8\n"; got != want {
+		t.Fatalf("CSV = %q, want %q", got, want)
+	}
+	if records[0].Code != 7 {
+		t.Fatalf("record code mutated to %d", records[0].Code)
+	}
+}
+
 func TestReadWriteConvenienceAndConfiguration(t *testing.T) {
 	frame, err := dataframe.New(dataframe.Column("id", []int{1}))
 	if err != nil {
@@ -244,6 +300,24 @@ func BenchmarkWrite(b *testing.B) {
 	}
 }
 
+func BenchmarkWriteRecords(b *testing.B) {
+	type row struct {
+		ID    int
+		Value float64
+	}
+	records := make([]row, 10_000)
+	for i := range records {
+		records[i] = row{ID: i, Value: float64(i) / 3}
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		var output strings.Builder
+		if err := NewWriter(&output).WriteRecords(records); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 type textCode int
 
 func (c *textCode) UnmarshalText(text []byte) error {
@@ -258,4 +332,11 @@ func (c *textCode) UnmarshalText(text []byte) error {
 
 func (c textCode) MarshalText() ([]byte, error) {
 	return []byte(fmt.Sprintf("C%d", c)), nil
+}
+
+type incrementingTextCode int
+
+func (c *incrementingTextCode) MarshalText() ([]byte, error) {
+	*c = *c + 1
+	return []byte(fmt.Sprintf("C%d", *c)), nil
 }

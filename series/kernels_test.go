@@ -293,6 +293,57 @@ func TestVariance(t *testing.T) {
 	}
 }
 
+func TestVarianceExtremeValues(t *testing.T) {
+	maximum := math.MaxFloat64
+	for _, values := range [][]float64{
+		{-maximum, maximum},
+		{maximum, -maximum},
+		{-maximum, 0, maximum},
+	} {
+		if got, ok := SampleVariance(New(values)); !ok || !math.IsInf(got, 1) {
+			t.Errorf("SampleVariance(%v) = (%v, %t), want (+Inf, true)", values, got, ok)
+		}
+	}
+
+	if got, ok := SampleVariance(New([]float64{maximum, maximum})); !ok || got != 0 {
+		t.Errorf("SampleVariance(equal maximums) = (%v, %t), want (0, true)", got, ok)
+	}
+
+	values := make([]float64, 1000)
+	values[0] = 1e155
+	if got, ok := SampleVariance(New(values)); !ok || math.Abs(got-1e307)/1e307 > 1e-14 {
+		t.Errorf("SampleVariance(large finite values) = (%v, %t), want approximately (1e307, true)", got, ok)
+	}
+
+	nullable := FromOptionals([]Optional[float64]{Some(-maximum), None[float64](), Some(maximum)})
+	if got, ok := SampleVariance(nullable); !ok || !math.IsInf(got, 1) {
+		t.Errorf("SampleVariance(nullable extremes) = (%v, %t), want (+Inf, true)", got, ok)
+	}
+	if got, ok := SampleStdDev(nullable); !ok || !math.IsInf(got, 1) {
+		t.Errorf("SampleStdDev(nullable extremes) = (%v, %t), want (+Inf, true)", got, ok)
+	}
+
+	for _, nonFinite := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		if got, ok := SampleVariance(New([]float64{0, nonFinite})); !ok || !math.IsNaN(got) {
+			t.Errorf("SampleVariance([0, %v]) = (%v, %t), want (NaN, true)", nonFinite, got, ok)
+		}
+	}
+}
+
+func BenchmarkSampleVariance(b *testing.B) {
+	values := make([]float64, 1<<14)
+	for i := range values {
+		values[i] = float64(i % 1000)
+	}
+	source := New(values)
+	b.ReportAllocs()
+	var result float64
+	for b.Loop() {
+		result, _ = SampleVariance(source)
+	}
+	runtime.KeepAlive(result)
+}
+
 func TestQuantileAndMedian(t *testing.T) {
 	values := FromOptionals([]Optional[int]{Some(0), Some(10), None[int](), Some(20), Some(30)})
 	tests := []struct {

@@ -244,25 +244,25 @@ func Pow[T Float](s Series[T], exponent T) Series[T] {
 
 // Sum returns the sum of present values and whether any are present.
 func Sum[T Number](s Series[T]) (T, bool) {
-	return reduce.Sum[T](s, nil)
+	return reduce.Sum(s, nil)
 }
 
 // Mean returns the arithmetic mean of present values and whether any are
 // present.
 func Mean[T Real](s Series[T]) (float64, bool) {
-	return reduce.Mean[T](s, nil)
+	return reduce.Mean(s, nil)
 }
 
 // Min returns the smallest present value and whether any are present. NaN
 // propagation follows Go's min.
 func Min[T cmp.Ordered](s Series[T]) (T, bool) {
-	return reduce.Min[T](s, nil)
+	return reduce.Min(s, nil)
 }
 
 // Max returns the largest present value and whether any are present. NaN
 // propagation follows Go's max.
 func Max[T cmp.Ordered](s Series[T]) (T, bool) {
-	return reduce.Max[T](s, nil)
+	return reduce.Max(s, nil)
 }
 
 // ArgMin returns the row index of the first minimum present value and whether
@@ -322,6 +322,9 @@ func SampleVariance[T Real](s Series[T]) (float64, bool) {
 	}
 	if count < 2 {
 		return 0, false
+	}
+	if sumSquares < 0 || math.IsNaN(sumSquares) || math.IsInf(sumSquares, 0) {
+		return scaledSampleVariance(s, count), true
 	}
 	return sumSquares / float64(count-1), true
 }
@@ -388,6 +391,39 @@ func Sorted[T cmp.Ordered](s Series[T]) Series[T] {
 // SortedDescending returns a stable descending ordering with nulls last.
 func SortedDescending[T cmp.Ordered](s Series[T]) Series[T] {
 	return s.SortedFunc(func(left, right T) int { return cmp.Compare(right, left) })
+}
+
+func scaledSampleVariance[T Real](s Series[T], count int) float64 {
+	scale := 0.0
+	for i, value := range s.values {
+		if s.validity.Initialized() && !s.validity.At(i) {
+			continue
+		}
+		converted := float64(value)
+		if math.IsNaN(converted) || math.IsInf(converted, 0) {
+			return math.NaN()
+		}
+		scale = max(scale, math.Abs(converted))
+	}
+	if scale == 0 {
+		return 0
+	}
+
+	mean := 0.0
+	sumSquares := 0.0
+	scaledCount := 0
+	for i, value := range s.values {
+		if s.validity.Initialized() && !s.validity.At(i) {
+			continue
+		}
+		scaledCount++
+		converted := float64(value) / scale
+		delta := converted - mean
+		mean += delta / float64(scaledCount)
+		sumSquares += delta * (converted - mean)
+	}
+	// Divide before rescaling twice so a representable variance stays finite.
+	return scale * (scale * (sumSquares / float64(count-1)))
 }
 
 func matchRows[T any](a, b Series[T], lengthMismatch string, predicate func(T, T) bool) mask.Mask {

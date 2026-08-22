@@ -26,26 +26,8 @@ type Field struct {
 // ColumnSpec is the sealed heterogeneous construction value accepted by New
 // and Grouped.Result. Construct values with Column or ColumnFromSeries.
 type ColumnSpec interface {
-	dataframeColumnSpec()
-	columnName() string
-	columnType() reflect.Type
-	columnNullable() bool
-	columnLen() int
-	columnAt(int) (any, bool)
-	columnRename(string) ColumnSpec
-	columnTake([]int) ColumnSpec
-	columnTakeNullable(series.Series[int]) ColumnSpec
-	columnSlice(int, int) ColumnSpec
-	columnFilter(mask.Mask) ColumnSpec
-	columnConcat([]ColumnSpec) (ColumnSpec, error)
+	dataframeColumnSpec() column
 }
-
-type columnSpec[T any] struct {
-	name   string
-	values series.Series[T]
-}
-
-func (columnSpec[T]) dataframeColumnSpec() {}
 
 // Column returns a named, non-null construction column containing a shallow
 // copy of values. New validates its name and row count.
@@ -67,7 +49,7 @@ func ColumnFromSeries[T any](name string, values series.Series[T]) ColumnSpec {
 // Frames retain their row count even when they contain zero columns, so Drop
 // and Select can produce a zero-width frame without losing rows.
 type Frame struct {
-	columns  []ColumnSpec
+	columns  []column
 	rowCount int
 }
 
@@ -80,12 +62,14 @@ func New(columns ...ColumnSpec) (Frame, error) {
 
 	rowCount := -1
 	names := make(map[string]struct{}, len(columns))
-	result := Frame{columns: slices.Clone(columns)}
-	for i, column := range result.columns {
-		if column == nil {
+	result := Frame{columns: make([]column, len(columns))}
+	for i, spec := range columns {
+		if spec == nil {
 			return Frame{}, fmt.Errorf("%w: column %d is nil", ErrSchemaMismatch, i)
 		}
-		name := column.columnName()
+		column := spec.dataframeColumnSpec()
+		result.columns[i] = column
+		name := column.name
 		if name == "" {
 			return Frame{}, fmt.Errorf("%w: column %d", ErrInvalidName, i)
 		}
@@ -93,10 +77,11 @@ func New(columns ...ColumnSpec) (Frame, error) {
 			return Frame{}, fmt.Errorf("%w: %q", ErrColumnConflict, name)
 		}
 		names[name] = struct{}{}
+		length := column.length
 		if rowCount < 0 {
-			rowCount = column.columnLen()
-		} else if column.columnLen() != rowCount {
-			return Frame{}, fmt.Errorf("%w: column %q has %d rows, want %d", ErrRowCount, name, column.columnLen(), rowCount)
+			rowCount = length
+		} else if length != rowCount {
+			return Frame{}, fmt.Errorf("%w: column %q has %d rows, want %d", ErrRowCount, name, length, rowCount)
 		}
 	}
 	result.rowCount = rowCount
@@ -117,7 +102,7 @@ func (f Frame) Width() int {
 func (f Frame) Names() []string {
 	names := make([]string, len(f.columns))
 	for i, column := range f.columns {
-		names[i] = column.columnName()
+		names[i] = column.name
 	}
 	return names
 }
@@ -127,9 +112,9 @@ func (f Frame) Schema() []Field {
 	fields := make([]Field, len(f.columns))
 	for i, column := range f.columns {
 		fields[i] = Field{
-			Name:     column.columnName(),
-			Type:     column.columnType(),
-			Nullable: column.columnNullable(),
+			Name:     column.name,
+			Type:     column.typeOf,
+			Nullable: column.nullable,
 		}
 	}
 	return fields
@@ -149,8 +134,8 @@ func (f Frame) String() string {
 		if i > 0 {
 			result.WriteString(", ")
 		}
-		fmt.Fprintf(&result, "%s:%v", column.columnName(), column.columnType())
-		if column.columnNullable() {
+		fmt.Fprintf(&result, "%s:%v", column.name, column.typeOf)
+		if column.nullable {
 			result.WriteByte('?')
 		}
 	}
@@ -170,8 +155,8 @@ func (f Frame) Column[T any](name string) (series.Series[T], error) {
 	}
 	column := f.columns[index]
 	want := reflect.TypeFor[T]()
-	if column.columnType() != want {
-		return series.Series[T]{}, fmt.Errorf("%w: column %q has type %v, want %v", ErrColumnType, name, column.columnType(), want)
+	if column.typeOf != want {
+		return series.Series[T]{}, fmt.Errorf("%w: column %q has type %v, want %v", ErrColumnType, name, column.typeOf, want)
 	}
 	return typedSeriesFromColumn[T](column)
 }
@@ -189,7 +174,7 @@ func (f Frame) With[T any](name string, values series.Series[T]) (Frame, error) 
 		}
 	}
 
-	column := columnSpec[T]{name: name, values: values}
+	column := typedColumn(name, values)
 	columns := slices.Clone(f.columns)
 	if index := f.columnIndex(name); index >= 0 {
 		columns[index] = column
@@ -225,9 +210,9 @@ func (f Frame) Drop(names ...string) (Frame, error) {
 		}
 		drop[name] = struct{}{}
 	}
-	columns := make([]ColumnSpec, 0, len(f.columns)-len(drop))
+	columns := make([]column, 0, len(f.columns)-len(drop))
 	for _, column := range f.columns {
-		if _, found := drop[column.columnName()]; !found {
+		if _, found := drop[column.name]; !found {
 			columns = append(columns, column)
 		}
 	}
@@ -252,7 +237,7 @@ func (f Frame) Rename(from, to string) (Frame, error) {
 		return Frame{}, fmt.Errorf("%w: %q", ErrColumnConflict, to)
 	}
 	columns := slices.Clone(f.columns)
-	columns[index] = columns[index].columnRename(to)
+	columns[index].name = to
 	return Frame{columns: columns, rowCount: f.Len()}, nil
 }
 
@@ -261,7 +246,7 @@ func (f Frame) Rename(from, to string) (Frame, error) {
 //
 // Errors: ErrColumnNotFound, ErrColumnConflict for duplicate selections.
 func (f Frame) Select(names ...string) (Frame, error) {
-	columns := make([]ColumnSpec, len(names))
+	columns := make([]column, len(names))
 	selected := make(map[string]struct{}, len(names))
 	for i, name := range names {
 		if _, exists := selected[name]; exists {
@@ -284,9 +269,11 @@ func (f Frame) Take(rows []int) Frame {
 			panic("dataframe: Take: row index out of range")
 		}
 	}
-	columns := make([]ColumnSpec, len(f.columns))
+	columns := make([]column, len(f.columns))
 	for i, column := range f.columns {
-		columns[i] = column.columnTake(rows)
+		columns[i] = column
+		columns[i].length = len(rows)
+		columns[i].values = column.values.take(rows)
 	}
 	return Frame{columns: columns, rowCount: len(rows)}
 }
@@ -314,9 +301,11 @@ func (f Frame) Slice(start, end int) Frame {
 	if start < 0 || end < start || end > f.Len() {
 		panic("dataframe: Slice: bounds out of range")
 	}
-	columns := make([]ColumnSpec, len(f.columns))
+	columns := make([]column, len(f.columns))
 	for i, column := range f.columns {
-		columns[i] = column.columnSlice(start, end)
+		columns[i] = column
+		columns[i].length = end - start
+		columns[i].values = column.values.slice(start, end)
 	}
 	return Frame{columns: columns, rowCount: end - start}
 }
@@ -326,11 +315,14 @@ func (f Frame) Filter(selection mask.Mask) Frame {
 	if selection.Len() != f.Len() {
 		panic(fmt.Sprintf("dataframe: Filter: length mismatch: frame=%d mask=%d", f.Len(), selection.Len()))
 	}
-	columns := make([]ColumnSpec, len(f.columns))
+	rowCount := selection.Count()
+	columns := make([]column, len(f.columns))
 	for i, column := range f.columns {
-		columns[i] = column.columnFilter(selection)
+		columns[i] = column
+		columns[i].length = rowCount
+		columns[i].values = column.values.filter(selection)
 	}
-	return Frame{columns: columns, rowCount: selection.Count()}
+	return Frame{columns: columns, rowCount: rowCount}
 }
 
 // FilterFunc keeps rows whose present values satisfy keep. Nulls are dropped
@@ -358,8 +350,8 @@ func (f Frame) Distinct() (Frame, error) {
 	}
 	if f.Width() == 1 {
 		column := f.columns[0]
-		if !column.columnType().Comparable() {
-			return Frame{}, fmt.Errorf("%w: column %q has type %v", ErrUnsupported, column.columnName(), column.columnType())
+		if !column.typeOf.Comparable() {
+			return Frame{}, fmt.Errorf("%w: column %q has type %v", ErrUnsupported, column.name, column.typeOf)
 		}
 		if rows, ok := distinctBuiltinRows(column); ok {
 			return f.Take(rows), nil
@@ -369,7 +361,7 @@ func (f Frame) Distinct() (Frame, error) {
 		rows := make([]int, 0, f.Len())
 		nullSeen := false
 		for row := 0; row < f.Len(); row++ {
-			value, present := column.columnAt(row)
+			value, present := column.values.at(row)
 			if !present {
 				if !nullSeen {
 					nullSeen = true
@@ -380,7 +372,7 @@ func (f Frame) Distinct() (Frame, error) {
 			if value != nil {
 				valueOf := reflect.ValueOf(value)
 				if !valueOf.Comparable() {
-					return Frame{}, fmt.Errorf("%w: column %q row %d contains incomparable dynamic type %v", ErrUnsupported, column.columnName(), row, valueOf.Type())
+					return Frame{}, fmt.Errorf("%w: column %q row %d contains incomparable dynamic type %v", ErrUnsupported, column.name, row, valueOf.Type())
 				}
 			}
 			if _, exists := seen[value]; exists {
@@ -397,11 +389,11 @@ func (f Frame) Distinct() (Frame, error) {
 
 	fields := make([]reflect.StructField, 0, f.Width()*2)
 	for i, column := range f.columns {
-		if !column.columnType().Comparable() {
-			return Frame{}, fmt.Errorf("%w: column %q has type %v", ErrUnsupported, column.columnName(), column.columnType())
+		if !column.typeOf.Comparable() {
+			return Frame{}, fmt.Errorf("%w: column %q has type %v", ErrUnsupported, column.name, column.typeOf)
 		}
 		fields = append(fields,
-			reflect.StructField{Name: fmt.Sprintf("Value%d", i), Type: column.columnType()},
+			reflect.StructField{Name: fmt.Sprintf("Value%d", i), Type: column.typeOf},
 			reflect.StructField{Name: fmt.Sprintf("Valid%d", i), Type: reflect.TypeFor[bool]()},
 		)
 	}
@@ -411,7 +403,7 @@ func (f Frame) Distinct() (Frame, error) {
 	rows := make([]int, 0, f.Len())
 	for row := 0; row < f.Len(); row++ {
 		for columnIndex, column := range f.columns {
-			value, present := column.columnAt(row)
+			value, present := column.values.at(row)
 			valueField := key.Field(columnIndex * 2)
 			key.Field(columnIndex*2 + 1).SetBool(present)
 			if !present || value == nil {
@@ -420,7 +412,7 @@ func (f Frame) Distinct() (Frame, error) {
 			}
 			valueOf := reflect.ValueOf(value)
 			if !valueOf.Comparable() {
-				return Frame{}, fmt.Errorf("%w: column %q row %d contains incomparable dynamic type %v", ErrUnsupported, column.columnName(), row, valueOf.Type())
+				return Frame{}, fmt.Errorf("%w: column %q row %d contains incomparable dynamic type %v", ErrUnsupported, column.name, row, valueOf.Type())
 			}
 			valueField.Set(valueOf)
 		}
@@ -488,8 +480,8 @@ func (f Frame) Concat(others ...Frame) (Frame, error) {
 		}
 		for columnIndex, column := range f.columns {
 			otherColumn := other.columns[columnIndex]
-			if otherColumn.columnName() != column.columnName() || otherColumn.columnType() != column.columnType() {
-				return Frame{}, fmt.Errorf("%w: frame %d column %d is %q:%v, want %q:%v", ErrSchemaMismatch, frameIndex+1, columnIndex, otherColumn.columnName(), otherColumn.columnType(), column.columnName(), column.columnType())
+			if otherColumn.name != column.name || otherColumn.typeOf != column.typeOf {
+				return Frame{}, fmt.Errorf("%w: frame %d column %d is %q:%v, want %q:%v", ErrSchemaMismatch, frameIndex+1, columnIndex, otherColumn.name, otherColumn.typeOf, column.name, column.typeOf)
 			}
 		}
 		if other.Len() > maxInt-total {
@@ -498,38 +490,76 @@ func (f Frame) Concat(others ...Frame) (Frame, error) {
 		total += other.Len()
 	}
 
-	columns := make([]ColumnSpec, f.Width())
-	for columnIndex, column := range f.columns {
-		parts := make([]ColumnSpec, len(others))
+	columns := make([]column, f.Width())
+	for columnIndex, base := range f.columns {
+		parts := make([]column, len(others))
 		for i, other := range others {
 			parts[i] = other.columns[columnIndex]
 		}
-		joined, err := column.columnConcat(parts)
+		values, err := base.values.concat(base, parts)
 		if err != nil {
 			return Frame{}, err
 		}
-		columns[columnIndex] = joined
+		base.length = total
+		for _, part := range parts {
+			base.nullable = base.nullable || part.nullable
+		}
+		base.values = values
+		columns[columnIndex] = base
 	}
 	return Frame{columns: columns, rowCount: total}, nil
 }
 
-func (c columnSpec[T]) columnName() string {
-	return c.name
+type column struct {
+	name     string
+	typeOf   reflect.Type
+	nullable bool
+	length   int
+	values   columnData
 }
 
-func (c columnSpec[T]) columnType() reflect.Type {
-	return reflect.TypeFor[T]()
+type columnData interface {
+	at(int) (any, bool)
+	take([]int) columnData
+	takeNullable(series.Series[int]) columnData
+	slice(int, int) columnData
+	filter(mask.Mask) columnData
+	concat(column, []column) (columnData, error)
 }
 
-func (c columnSpec[T]) columnNullable() bool {
-	return c.values.Nullable()
+type columnSpec[T any] struct {
+	name   string
+	values series.Series[T]
 }
 
-func (c columnSpec[T]) columnLen() int {
-	return c.values.Len()
+type typedData[T any] struct {
+	values series.Series[T]
 }
 
-func (c columnSpec[T]) columnAt(i int) (any, bool) {
+func (c columnSpec[T]) dataframeColumnSpec() column {
+	return typedColumn(c.name, c.values)
+}
+
+func typedColumn[T any](name string, values series.Series[T]) column {
+	return column{
+		name:     name,
+		typeOf:   reflect.TypeFor[T](),
+		nullable: values.Nullable(),
+		length:   values.Len(),
+		values:   typedData[T]{values: values},
+	}
+}
+
+func (f Frame) columnIndex(name string) int {
+	for i, column := range f.columns {
+		if column.name == name {
+			return i
+		}
+	}
+	return -1
+}
+
+func (c typedData[T]) at(i int) (any, bool) {
 	value, present := c.values.At(i)
 	if !present {
 		return nil, false
@@ -537,36 +567,31 @@ func (c columnSpec[T]) columnAt(i int) (any, bool) {
 	return value, true
 }
 
-func (c columnSpec[T]) columnRename(name string) ColumnSpec {
-	c.name = name
-	return c
-}
-
-func (c columnSpec[T]) columnTake(rows []int) ColumnSpec {
+func (c typedData[T]) take(rows []int) columnData {
 	c.values = c.values.Take(rows)
 	return c
 }
 
-func (c columnSpec[T]) columnTakeNullable(rows series.Series[int]) ColumnSpec {
+func (c typedData[T]) takeNullable(rows series.Series[int]) columnData {
 	c.values = c.values.TakeNullable(rows)
 	return c
 }
 
-func (c columnSpec[T]) columnSlice(start, end int) ColumnSpec {
+func (c typedData[T]) slice(start, end int) columnData {
 	c.values = c.values.Slice(start, end)
 	return c
 }
 
-func (c columnSpec[T]) columnFilter(selection mask.Mask) ColumnSpec {
+func (c typedData[T]) filter(selection mask.Mask) columnData {
 	c.values = c.values.Filter(selection)
 	return c
 }
 
-func (c columnSpec[T]) columnConcat(others []ColumnSpec) (ColumnSpec, error) {
+func (c typedData[T]) concat(base column, others []column) (columnData, error) {
 	parts := make([]series.Series[T], len(others))
 	for i, other := range others {
-		if other.columnType() != reflect.TypeFor[T]() {
-			return nil, fmt.Errorf("%w: column %q type %v does not match %v", ErrSchemaMismatch, c.name, other.columnType(), reflect.TypeFor[T]())
+		if other.typeOf != base.typeOf {
+			return nil, fmt.Errorf("%w: column %q type %v does not match %v", ErrSchemaMismatch, base.name, other.typeOf, base.typeOf)
 		}
 		values, err := typedSeriesFromColumn[T](other)
 		if err != nil {
@@ -579,6 +604,7 @@ func (c columnSpec[T]) columnConcat(others []ColumnSpec) (ColumnSpec, error) {
 }
 
 type distinctColumn interface {
+	rows() []int
 	hash(*maphash.Hash, int)
 	equal(int, int) bool
 }
@@ -591,48 +617,15 @@ type distinctRowHasher struct {
 	columns []distinctColumn
 }
 
-func distinctBuiltinRows(column ColumnSpec) ([]int, bool) {
-	switch column := column.(type) {
-	case columnSpec[bool]:
-		return distinctRows(column.values), true
-	case columnSpec[string]:
-		return distinctRows(column.values), true
-	case columnSpec[int]:
-		return distinctRows(column.values), true
-	case columnSpec[int8]:
-		return distinctRows(column.values), true
-	case columnSpec[int16]:
-		return distinctRows(column.values), true
-	case columnSpec[int32]:
-		return distinctRows(column.values), true
-	case columnSpec[int64]:
-		return distinctRows(column.values), true
-	case columnSpec[uint]:
-		return distinctRows(column.values), true
-	case columnSpec[uint8]:
-		return distinctRows(column.values), true
-	case columnSpec[uint16]:
-		return distinctRows(column.values), true
-	case columnSpec[uint32]:
-		return distinctRows(column.values), true
-	case columnSpec[uint64]:
-		return distinctRows(column.values), true
-	case columnSpec[uintptr]:
-		return distinctRows(column.values), true
-	case columnSpec[float32]:
-		return distinctRows(column.values), true
-	case columnSpec[float64]:
-		return distinctRows(column.values), true
-	case columnSpec[complex64]:
-		return distinctRows(column.values), true
-	case columnSpec[complex128]:
-		return distinctRows(column.values), true
-	default:
+func distinctBuiltinRows(column column) ([]int, bool) {
+	values, ok := newDistinctColumn(column)
+	if !ok {
 		return nil, false
 	}
+	return values.rows(), true
 }
 
-func distinctBuiltinFrameRows(columns []ColumnSpec, length int) ([]int, bool) {
+func distinctBuiltinFrameRows(columns []column, length int) ([]int, bool) {
 	distinctColumns := make([]distinctColumn, len(columns))
 	for i, column := range columns {
 		var ok bool
@@ -652,42 +645,42 @@ func distinctBuiltinFrameRows(columns []ColumnSpec, length int) ([]int, bool) {
 	return rows, true
 }
 
-func newDistinctColumn(column ColumnSpec) (distinctColumn, bool) {
-	switch column := column.(type) {
-	case columnSpec[bool]:
-		return typedDistinctColumn[bool]{values: column.values}, true
-	case columnSpec[string]:
-		return typedDistinctColumn[string]{values: column.values}, true
-	case columnSpec[int]:
-		return typedDistinctColumn[int]{values: column.values}, true
-	case columnSpec[int8]:
-		return typedDistinctColumn[int8]{values: column.values}, true
-	case columnSpec[int16]:
-		return typedDistinctColumn[int16]{values: column.values}, true
-	case columnSpec[int32]:
-		return typedDistinctColumn[int32]{values: column.values}, true
-	case columnSpec[int64]:
-		return typedDistinctColumn[int64]{values: column.values}, true
-	case columnSpec[uint]:
-		return typedDistinctColumn[uint]{values: column.values}, true
-	case columnSpec[uint8]:
-		return typedDistinctColumn[uint8]{values: column.values}, true
-	case columnSpec[uint16]:
-		return typedDistinctColumn[uint16]{values: column.values}, true
-	case columnSpec[uint32]:
-		return typedDistinctColumn[uint32]{values: column.values}, true
-	case columnSpec[uint64]:
-		return typedDistinctColumn[uint64]{values: column.values}, true
-	case columnSpec[uintptr]:
-		return typedDistinctColumn[uintptr]{values: column.values}, true
-	case columnSpec[float32]:
-		return typedDistinctColumn[float32]{values: column.values}, true
-	case columnSpec[float64]:
-		return typedDistinctColumn[float64]{values: column.values}, true
-	case columnSpec[complex64]:
-		return typedDistinctColumn[complex64]{values: column.values}, true
-	case columnSpec[complex128]:
-		return typedDistinctColumn[complex128]{values: column.values}, true
+func newDistinctColumn(column column) (distinctColumn, bool) {
+	switch values := column.values.(type) {
+	case typedData[bool]:
+		return typedDistinctColumn[bool]{values: values.values}, true
+	case typedData[string]:
+		return typedDistinctColumn[string]{values: values.values}, true
+	case typedData[int]:
+		return typedDistinctColumn[int]{values: values.values}, true
+	case typedData[int8]:
+		return typedDistinctColumn[int8]{values: values.values}, true
+	case typedData[int16]:
+		return typedDistinctColumn[int16]{values: values.values}, true
+	case typedData[int32]:
+		return typedDistinctColumn[int32]{values: values.values}, true
+	case typedData[int64]:
+		return typedDistinctColumn[int64]{values: values.values}, true
+	case typedData[uint]:
+		return typedDistinctColumn[uint]{values: values.values}, true
+	case typedData[uint8]:
+		return typedDistinctColumn[uint8]{values: values.values}, true
+	case typedData[uint16]:
+		return typedDistinctColumn[uint16]{values: values.values}, true
+	case typedData[uint32]:
+		return typedDistinctColumn[uint32]{values: values.values}, true
+	case typedData[uint64]:
+		return typedDistinctColumn[uint64]{values: values.values}, true
+	case typedData[uintptr]:
+		return typedDistinctColumn[uintptr]{values: values.values}, true
+	case typedData[float32]:
+		return typedDistinctColumn[float32]{values: values.values}, true
+	case typedData[float64]:
+		return typedDistinctColumn[float64]{values: values.values}, true
+	case typedData[complex64]:
+		return typedDistinctColumn[complex64]{values: values.values}, true
+	case typedData[complex128]:
+		return typedDistinctColumn[complex128]{values: values.values}, true
 	default:
 		return nil, false
 	}
@@ -706,6 +699,10 @@ func (h distinctRowHasher) Equal(left, right int) bool {
 		}
 	}
 	return true
+}
+
+func (c typedDistinctColumn[T]) rows() []int {
+	return distinctRows(c.values)
 }
 
 func (c typedDistinctColumn[T]) hash(hash *maphash.Hash, row int) {
@@ -744,13 +741,4 @@ func distinctRows[T comparable](values series.Series[T]) []int {
 		rows = append(rows, row)
 	}
 	return rows
-}
-
-func (f Frame) columnIndex(name string) int {
-	for i, column := range f.columns {
-		if column.columnName() == name {
-			return i
-		}
-	}
-	return -1
 }

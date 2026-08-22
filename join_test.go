@@ -256,25 +256,25 @@ func TestOuterJoinsPreserveTypedColumnStorage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := leftJoined.columns[0].(columnSpec[int]); !ok {
-		t.Fatalf("LeftJoin key storage is %T, want columnSpec[int]", leftJoined.columns[0])
+	if _, ok := leftJoined.columns[0].values.(typedData[int]); !ok {
+		t.Fatalf("LeftJoin key storage is %T, want typedData[int]", leftJoined.columns[0].values)
 	}
-	if _, ok := leftJoined.columns[2].(columnSpec[string]); !ok {
-		t.Fatalf("LeftJoin nullable right storage is %T, want columnSpec[string]", leftJoined.columns[2])
+	if _, ok := leftJoined.columns[2].values.(typedData[string]); !ok {
+		t.Fatalf("LeftJoin nullable right storage is %T, want typedData[string]", leftJoined.columns[2].values)
 	}
 
 	full, err := left.FullJoin(right, Using[int]("key"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := full.columns[0].(columnSpec[int]); !ok {
-		t.Fatalf("FullJoin key storage is %T, want columnSpec[int]", full.columns[0])
+	if _, ok := full.columns[0].values.(typedData[int]); !ok {
+		t.Fatalf("FullJoin key storage is %T, want typedData[int]", full.columns[0].values)
 	}
-	if _, ok := full.columns[1].(columnSpec[string]); !ok {
-		t.Fatalf("FullJoin nullable left storage is %T, want columnSpec[string]", full.columns[1])
+	if _, ok := full.columns[1].values.(typedData[string]); !ok {
+		t.Fatalf("FullJoin nullable left storage is %T, want typedData[string]", full.columns[1].values)
 	}
-	if _, ok := full.columns[2].(columnSpec[string]); !ok {
-		t.Fatalf("FullJoin nullable right storage is %T, want columnSpec[string]", full.columns[2])
+	if _, ok := full.columns[2].values.(typedData[string]); !ok {
+		t.Fatalf("FullJoin nullable right storage is %T, want typedData[string]", full.columns[2].values)
 	}
 }
 

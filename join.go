@@ -161,12 +161,16 @@ func (f Frame) CrossJoin(right Frame) (Frame, error) {
 			rightRows = append(rightRows, rightRow)
 		}
 	}
-	columns := make([]ColumnSpec, 0, f.Width()+right.Width())
+	columns := make([]column, 0, f.Width()+right.Width())
 	for _, column := range f.columns {
-		columns = append(columns, column.columnTake(leftRows))
+		column.length = total
+		column.values = column.values.take(leftRows)
+		columns = append(columns, column)
 	}
 	for _, column := range right.columns {
-		columns = append(columns, column.columnTake(rightRows))
+		column.length = total
+		column.values = column.values.take(rightRows)
+		columns = append(columns, column)
 	}
 	return Frame{columns: columns, rowCount: total}, nil
 }
@@ -322,7 +326,7 @@ func resolveJoinPlan[K any](left, right Frame, key JoinKey[K]) (resolvedJoinPlan
 func validateColumnNames(left, right Frame, leftKeyIndex, rightKeyIndex int, outputName string) error {
 	names := make(map[string]struct{}, left.Width()+right.Width())
 	for i, column := range left.columns {
-		name := column.columnName()
+		name := column.name
 		if i == leftKeyIndex {
 			name = outputName
 		}
@@ -335,7 +339,7 @@ func validateColumnNames(left, right Frame, leftKeyIndex, rightKeyIndex int, out
 		if i == rightKeyIndex {
 			continue
 		}
-		name := column.columnName()
+		name := column.name
 		if _, exists := names[name]; exists {
 			return fmt.Errorf("%w: %q", ErrColumnConflict, name)
 		}
@@ -449,28 +453,34 @@ func buildJoinFrame[K any](left, right Frame, plan resolvedJoinPlan[K], leftRows
 		nullableRightRows = joinRowIndexes(rightRows)
 	}
 
-	columns := make([]ColumnSpec, 0, left.Width()+right.Width())
+	columns := make([]column, 0, left.Width()+right.Width())
 	for i, column := range left.columns {
 		if i == plan.projection.leftKeyIndex {
 			joined := joinedKey(plan, leftRows, rightRows, nullableLeftRows, nullableRightRows, kind)
-			columns = append(columns, ColumnFromSeries(plan.projection.outputName, joined))
+			columns = append(columns, typedColumn(plan.projection.outputName, joined))
 			continue
 		}
 		if kind == rightJoin || kind == fullJoin {
-			columns = append(columns, column.columnTakeNullable(nullableLeftRows))
+			column.nullable = true
+			column.values = column.values.takeNullable(nullableLeftRows)
 		} else {
-			columns = append(columns, column.columnTake(leftRows))
+			column.values = column.values.take(leftRows)
 		}
+		column.length = len(leftRows)
+		columns = append(columns, column)
 	}
 	for i, column := range right.columns {
 		if i == plan.projection.rightKeyIndex {
 			continue
 		}
 		if kind == leftJoin || kind == fullJoin {
-			columns = append(columns, column.columnTakeNullable(nullableRightRows))
+			column.nullable = true
+			column.values = column.values.takeNullable(nullableRightRows)
 		} else {
-			columns = append(columns, column.columnTake(rightRows))
+			column.values = column.values.take(rightRows)
 		}
+		column.length = len(leftRows)
+		columns = append(columns, column)
 	}
 	return Frame{columns: columns, rowCount: len(leftRows)}
 }

@@ -43,6 +43,14 @@ func TestColumns(t *testing.T) {
 	}
 }
 
+func TestZeroColumnView(t *testing.T) {
+	var view ColumnView
+	if view.Name() != "" || view.Len() != 0 || view.Type() != nil || view.Nullable() {
+		t.Fatalf("zero ColumnView = {Name:%q Len:%d Type:%v Nullable:%t}", view.Name(), view.Len(), view.Type(), view.Nullable())
+	}
+	assertPanics(t, func() { view.At(0) })
+}
+
 func TestColumnCopiesInput(t *testing.T) {
 	values := []int{1, 2}
 	frame, err := New(Column("id", values))

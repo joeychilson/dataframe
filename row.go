@@ -47,14 +47,14 @@ func (r Row) Get[T any](column string) (value T, present bool, err error) {
 	}
 	stored := r.frame.columns[index]
 	want := reflect.TypeFor[T]()
-	if stored.columnType() != want {
-		return value, false, fmt.Errorf("%w: column %q has type %v, want %v", ErrColumnType, column, stored.columnType(), want)
+	if stored.typeOf != want {
+		return value, false, fmt.Errorf("%w: column %q has type %v, want %v", ErrColumnType, column, stored.typeOf, want)
 	}
-	if typed, ok := stored.(columnSpec[T]); ok {
+	if typed, ok := stored.values.(typedData[T]); ok {
 		value, present = typed.values.At(r.index)
 		return value, present, nil
 	}
-	dynamic, present := stored.columnAt(r.index)
+	dynamic, present := stored.values.at(r.index)
 	if !present || dynamic == nil {
 		return value, present, nil
 	}
@@ -117,15 +117,15 @@ func (f Frame) Records[T any]() ([]T, error) {
 	if err != nil {
 		return nil, err
 	}
-	columns := make([]ColumnSpec, len(fields))
+	columns := make([]column, len(fields))
 	for i, field := range fields {
 		index := f.columnIndex(field.Name)
 		if index < 0 {
 			return nil, fmt.Errorf("%w: %q", ErrColumnNotFound, field.Name)
 		}
 		column := f.columns[index]
-		if column.columnType() != field.ValueType {
-			return nil, fmt.Errorf("%w: column %q has type %v, want %v", ErrColumnType, field.Name, column.columnType(), field.ValueType)
+		if column.typeOf != field.ValueType {
+			return nil, fmt.Errorf("%w: column %q has type %v, want %v", ErrColumnType, field.Name, column.typeOf, field.ValueType)
 		}
 		columns[i] = column
 	}
@@ -134,7 +134,7 @@ func (f Frame) Records[T any]() ([]T, error) {
 	for row := range records {
 		recordValue := reflect.ValueOf(&records[row]).Elem()
 		for i, field := range fields {
-			value, present := columns[i].columnAt(row)
+			value, present := columns[i].values.at(row)
 			if !present {
 				if !field.Nullable() {
 					return nil, fmt.Errorf("%w: null in non-null field %s at row %d", ErrInvalidRecord, field.Name, row)

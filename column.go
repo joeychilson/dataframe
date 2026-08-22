@@ -16,25 +16,14 @@ import (
 //
 // The zero value is an unnamed, zero-length view whose Type is nil.
 type ColumnView struct {
-	name     string
-	values   ColumnSpec
-	typeOf   reflect.Type
-	nullable bool
-	length   int
+	column column
 }
 
 // Columns iterates read-only column views in schema order.
 func (f Frame) Columns() iter.Seq[ColumnView] {
 	return func(yield func(ColumnView) bool) {
 		for _, column := range f.columns {
-			view := ColumnView{
-				name:     column.columnName(),
-				values:   column,
-				typeOf:   column.columnType(),
-				nullable: column.columnNullable(),
-				length:   column.columnLen(),
-			}
-			if !yield(view) {
+			if !yield(ColumnView{column: column}) {
 				return
 			}
 		}
@@ -44,31 +33,31 @@ func (f Frame) Columns() iter.Seq[ColumnView] {
 // Name returns the column name. It returns the empty string for the zero view;
 // Frames never contain empty column names.
 func (c ColumnView) Name() string {
-	return c.name
+	return c.column.name
 }
 
 // Len returns the column's row count.
 func (c ColumnView) Len() int {
-	return c.length
+	return c.column.length
 }
 
 // Type returns the exact Go element type, or nil for the zero view.
 func (c ColumnView) Type() reflect.Type {
-	return c.typeOf
+	return c.column.typeOf
 }
 
 // Nullable reports whether the column's schema permits null cells.
 func (c ColumnView) Nullable() bool {
-	return c.nullable
+	return c.column.nullable
 }
 
 // At returns row i and whether it is present. A null cell returns nil, false.
 // It panics when i is out of range.
 func (c ColumnView) At(i int) (any, bool) {
-	if i < 0 || i >= c.length {
+	if i < 0 || i >= c.Len() {
 		panic("dataframe: ColumnView.At: index out of range")
 	}
-	return c.values.columnAt(i)
+	return c.column.values.at(i)
 }
 
 func columnFromSlice(name string, values reflect.Value, validity []bool) ColumnSpec {
@@ -138,25 +127,22 @@ type reflectColumnSpec struct {
 	validity bitmap.Bitmap
 }
 
-func (c reflectColumnSpec) dataframeColumnSpec() {}
-
-func (c reflectColumnSpec) columnName() string {
-	return c.name
+type reflectData struct {
+	values   reflect.Value
+	validity bitmap.Bitmap
 }
 
-func (c reflectColumnSpec) columnType() reflect.Type {
-	return c.typeOf
+func (c reflectColumnSpec) dataframeColumnSpec() column {
+	return column{
+		name:     c.name,
+		typeOf:   c.typeOf,
+		nullable: c.validity.Initialized(),
+		length:   c.values.Len(),
+		values:   reflectData{values: c.values, validity: c.validity},
+	}
 }
 
-func (c reflectColumnSpec) columnNullable() bool {
-	return c.validity.Initialized()
-}
-
-func (c reflectColumnSpec) columnLen() int {
-	return c.values.Len()
-}
-
-func (c reflectColumnSpec) columnAt(i int) (any, bool) {
+func (c reflectData) at(i int) (any, bool) {
 	value := c.values.Index(i)
 	if c.validity.Initialized() && !c.validity.At(i) {
 		return nil, false
@@ -164,13 +150,8 @@ func (c reflectColumnSpec) columnAt(i int) (any, bool) {
 	return value.Interface(), true
 }
 
-func (c reflectColumnSpec) columnRename(name string) ColumnSpec {
-	c.name = name
-	return c
-}
-
-func (c reflectColumnSpec) columnTake(rows []int) ColumnSpec {
-	values := reflect.MakeSlice(reflect.SliceOf(c.typeOf), len(rows), len(rows))
+func (c reflectData) take(rows []int) columnData {
+	values := reflect.MakeSlice(c.values.Type(), len(rows), len(rows))
 	var validity bitmap.Bitmap
 	if c.validity.Initialized() {
 		validity = bitmap.New(len(rows))
@@ -181,11 +162,11 @@ func (c reflectColumnSpec) columnTake(rows []int) ColumnSpec {
 			validity.Set(i, true)
 		}
 	}
-	return reflectColumnSpec{name: c.name, typeOf: c.typeOf, values: values, validity: validity}
+	return reflectData{values: values, validity: validity}
 }
 
-func (c reflectColumnSpec) columnTakeNullable(rows series.Series[int]) ColumnSpec {
-	values := reflect.MakeSlice(reflect.SliceOf(c.typeOf), rows.Len(), rows.Len())
+func (c reflectData) takeNullable(rows series.Series[int]) columnData {
+	values := reflect.MakeSlice(c.values.Type(), rows.Len(), rows.Len())
 	validity := bitmap.New(rows.Len())
 	for i := 0; i < rows.Len(); i++ {
 		row, present := rows.At(i)
@@ -197,23 +178,19 @@ func (c reflectColumnSpec) columnTakeNullable(rows series.Series[int]) ColumnSpe
 			validity.Set(i, true)
 		}
 	}
-	return reflectColumnSpec{name: c.name, typeOf: c.typeOf, values: values, validity: validity}
+	return reflectData{values: values, validity: validity}
 }
 
-func (c reflectColumnSpec) columnSlice(start, end int) ColumnSpec {
-	result := reflectColumnSpec{
-		name:   c.name,
-		typeOf: c.typeOf,
-		values: c.values.Slice3(start, end, end),
-	}
+func (c reflectData) slice(start, end int) columnData {
+	result := reflectData{values: c.values.Slice3(start, end, end)}
 	if c.validity.Initialized() {
 		result.validity = c.validity.Slice(start, end)
 	}
 	return result
 }
 
-func (c reflectColumnSpec) columnFilter(selection mask.Mask) ColumnSpec {
-	values := reflect.MakeSlice(reflect.SliceOf(c.typeOf), selection.Count(), selection.Count())
+func (c reflectData) filter(selection mask.Mask) columnData {
+	values := reflect.MakeSlice(c.values.Type(), selection.Count(), selection.Count())
 	var validity bitmap.Bitmap
 	if c.validity.Initialized() {
 		validity = bitmap.New(values.Len())
@@ -226,36 +203,36 @@ func (c reflectColumnSpec) columnFilter(selection mask.Mask) ColumnSpec {
 		}
 		i++
 	}
-	return reflectColumnSpec{name: c.name, typeOf: c.typeOf, values: values, validity: validity}
+	return reflectData{values: values, validity: validity}
 }
 
-func (c reflectColumnSpec) columnConcat(others []ColumnSpec) (ColumnSpec, error) {
+func (c reflectData) concat(base column, others []column) (columnData, error) {
 	maxInt := int(^uint(0) >> 1)
-	total := c.columnLen()
-	nullable := c.columnNullable()
+	total := base.length
+	nullable := base.nullable
 	for _, other := range others {
-		if other.columnType() != c.typeOf {
-			return nil, fmt.Errorf("%w: column %q type %v does not match %v", ErrSchemaMismatch, c.name, other.columnType(), c.typeOf)
+		if other.typeOf != base.typeOf {
+			return nil, fmt.Errorf("%w: column %q type %v does not match %v", ErrSchemaMismatch, base.name, other.typeOf, base.typeOf)
 		}
-		if other.columnLen() > maxInt-total {
-			return nil, fmt.Errorf("%w: concatenated column %q length overflows int", ErrRowCount, c.name)
+		if other.length > maxInt-total {
+			return nil, fmt.Errorf("%w: concatenated column %q length overflows int", ErrRowCount, base.name)
 		}
-		total += other.columnLen()
-		nullable = nullable || other.columnNullable()
+		total += other.length
+		nullable = nullable || other.nullable
 	}
 
-	values := reflect.MakeSlice(reflect.SliceOf(c.typeOf), total, total)
+	values := reflect.MakeSlice(c.values.Type(), total, total)
 	var validity bitmap.Bitmap
 	if nullable {
 		validity = bitmap.Filled(total)
 	}
-	all := make([]ColumnSpec, 0, len(others)+1)
-	all = append(all, c)
+	all := make([]column, 0, len(others)+1)
+	all = append(all, base)
 	all = append(all, others...)
 	offset := 0
 	for _, column := range all {
-		for row := 0; row < column.columnLen(); row++ {
-			value, present := column.columnAt(row)
+		for row := range column.length {
+			value, present := column.values.at(row)
 			if present && value != nil {
 				values.Index(offset + row).Set(reflect.ValueOf(value))
 			}
@@ -263,27 +240,27 @@ func (c reflectColumnSpec) columnConcat(others []ColumnSpec) (ColumnSpec, error)
 				validity.Set(offset+row, false)
 			}
 		}
-		offset += column.columnLen()
+		offset += column.length
 	}
-	return reflectColumnSpec{name: c.name, typeOf: c.typeOf, values: values, validity: validity}, nil
+	return reflectData{values: values, validity: validity}, nil
 }
 
-func typedSeriesFromColumn[T any](column ColumnSpec) (series.Series[T], error) {
-	if typed, ok := column.(columnSpec[T]); ok {
+func typedSeriesFromColumn[T any](column column) (series.Series[T], error) {
+	if typed, ok := column.values.(typedData[T]); ok {
 		return typed.values, nil
 	}
-	values := make([]T, column.columnLen())
+	values := make([]T, column.length)
 	var validity []bool
-	if column.columnNullable() {
+	if column.nullable {
 		validity = make([]bool, len(values))
 	}
 	for i := range values {
-		value, present := column.columnAt(i)
+		value, present := column.values.at(i)
 		if present {
 			if value != nil {
 				converted, ok := value.(T)
 				if !ok {
-					return series.Series[T]{}, fmt.Errorf("%w: column %q contains %T, want %v", ErrColumnType, column.columnName(), value, reflect.TypeFor[T]())
+					return series.Series[T]{}, fmt.Errorf("%w: column %q contains %T, want %v", ErrColumnType, column.name, value, reflect.TypeFor[T]())
 				}
 				values[i] = converted
 			}

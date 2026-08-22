@@ -174,14 +174,14 @@ func TestFromRecordsUsesTypedStorageForBuiltins(t *testing.T) {
 	assertTypedRecordColumn[int](t, frame, "Pointer")
 	assertTypedRecordColumn[string](t, frame, "Optional")
 	for _, name := range []string{"Pointer", "Optional"} {
-		if !frame.columns[frame.columnIndex(name)].columnNullable() {
+		if !frame.columns[frame.columnIndex(name)].nullable {
 			t.Fatalf("column %q is not nullable", name)
 		}
 	}
 	for _, name := range []string{"Defined", "Slice"} {
 		index := frame.columnIndex(name)
-		if _, ok := frame.columns[index].(reflectColumnSpec); !ok {
-			t.Fatalf("column %q storage is %T, want reflectColumnSpec", name, frame.columns[index])
+		if _, ok := frame.columns[index].values.(reflectData); !ok {
+			t.Fatalf("column %q storage is %T, want reflectData", name, frame.columns[index].values)
 		}
 	}
 }
@@ -287,6 +287,41 @@ func TestRecordBackedFrameOperations(t *testing.T) {
 	}
 }
 
+func TestConcatTypedAndReflectedColumns(t *testing.T) {
+	type identifier int
+	type record struct {
+		Value identifier
+	}
+	reflected, err := FromRecords([]record{{Value: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	typed, err := New(Column("Value", []identifier{2}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		left, right Frame
+		want        []identifier
+	}{
+		{left: reflected, right: typed, want: []identifier{1, 2}},
+		{left: typed, right: reflected, want: []identifier{2, 1}},
+	}
+	for _, test := range tests {
+		joined, err := test.left.Concat(test.right)
+		if err != nil {
+			t.Fatal(err)
+		}
+		values, err := joined.Column[identifier]("Value")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := values.Values(); !slices.Equal(got, test.want) {
+			t.Fatalf("Concat values = %v, want %v", got, test.want)
+		}
+	}
+}
+
 func BenchmarkFromRecords(b *testing.B) {
 	type record struct {
 		ID    int
@@ -378,7 +413,7 @@ func assertTypedRecordColumn[T any](t *testing.T, frame Frame, name string) {
 	if index < 0 {
 		t.Fatalf("column %q not found", name)
 	}
-	if _, ok := frame.columns[index].(columnSpec[T]); !ok {
-		t.Fatalf("column %q storage is %T, want columnSpec[%v]", name, frame.columns[index], reflect.TypeFor[T]())
+	if _, ok := frame.columns[index].values.(typedData[T]); !ok {
+		t.Fatalf("column %q storage is %T, want typedData[%v]", name, frame.columns[index].values, reflect.TypeFor[T]())
 	}
 }

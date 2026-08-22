@@ -209,18 +209,40 @@ func TestWrite(t *testing.T) {
 	}
 }
 
-func TestWriteRecordsAndTextMarshaler(t *testing.T) {
+func TestWriteRecordsAndTextEncoders(t *testing.T) {
 	type row struct {
-		Code textCode `df:"code"`
-		Name *string  `df:"name"`
+		Code      textCode             `df:"code"`
+		Preferred preferredTextEncoder `df:"preferred"`
+		Label     appendOnlyText       `df:"label"`
+		Name      *string              `df:"name"`
 	}
 	name := "A"
+	appendCalls := 0
+	preferred := preferredTextEncoder{AppendCalls: &appendCalls}
 	var output strings.Builder
-	if err := NewWriter(&output).WriteRecords([]row{{Code: 7, Name: &name}, {Code: 8}}); err != nil {
+	if err := NewWriter(&output).WriteRecords([]row{{Code: 7, Preferred: preferred, Label: "first", Name: &name}, {Code: 8, Preferred: preferred, Label: ""}}); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := output.String(), "code,name\nC7,A\nC8,\n"; got != want {
+	if got, want := output.String(), "code,preferred,label,name\nC7,P,first,A\nC8,P,,\n"; got != want {
 		t.Fatalf("CSV = %q, want %q", got, want)
+	}
+	if appendCalls != 2 {
+		t.Fatalf("AppendText calls = %d, want 2", appendCalls)
+	}
+
+	frame, err := dataframe.New(dataframe.Column("preferred", []preferredTextEncoder{preferred}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := NewWriter(&output).Write(frame); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := output.String(), "preferred\nP\n"; got != want {
+		t.Fatalf("frame CSV = %q, want %q", got, want)
+	}
+	if appendCalls != 3 {
+		t.Fatalf("frame AppendText calls = %d, want 3", appendCalls)
 	}
 }
 
@@ -288,6 +310,25 @@ func TestWriteRecordsFormatsNumericFields(t *testing.T) {
 func TestWriteRecordsDoesNotMutateTextMarshaler(t *testing.T) {
 	type row struct {
 		Code incrementingTextCode `df:"code"`
+	}
+	records := []row{{Code: 7}}
+	var output strings.Builder
+	writer := NewWriter(&output)
+	writer.Header = false
+	if err := writer.WriteRecords(records); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := output.String(), "C8\n"; got != want {
+		t.Fatalf("CSV = %q, want %q", got, want)
+	}
+	if records[0].Code != 7 {
+		t.Fatalf("record code mutated to %d", records[0].Code)
+	}
+}
+
+func TestWriteRecordsDoesNotMutateTextAppender(t *testing.T) {
+	type row struct {
+		Code incrementingAppendCode `df:"code"`
 	}
 	records := []row{{Code: 7}}
 	var output strings.Builder
@@ -458,6 +499,23 @@ func BenchmarkWriteRecords(b *testing.B) {
 	}
 }
 
+func BenchmarkWriteRecordsTextAppender(b *testing.B) {
+	type row struct {
+		Code textCode
+	}
+	records := make([]row, 10_000)
+	for i := range records {
+		records[i].Code = textCode(i)
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		var output strings.Builder
+		if err := NewWriter(&output).WriteRecords(records); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 type textCode int
 
 func (c *textCode) UnmarshalText(text []byte) error {
@@ -470,8 +528,31 @@ func (c *textCode) UnmarshalText(text []byte) error {
 	return nil
 }
 
+func (c textCode) AppendText(buffer []byte) ([]byte, error) {
+	return strconv.AppendInt(append(buffer, 'C'), int64(c), 10), nil
+}
+
 func (c textCode) MarshalText() ([]byte, error) {
-	return fmt.Appendf(nil, "C%d", c), nil
+	return c.AppendText(nil)
+}
+
+type preferredTextEncoder struct {
+	AppendCalls *int
+}
+
+func (encoder preferredTextEncoder) AppendText(buffer []byte) ([]byte, error) {
+	(*encoder.AppendCalls)++
+	return append(buffer, 'P'), nil
+}
+
+func (preferredTextEncoder) MarshalText() ([]byte, error) {
+	return []byte{'P'}, nil
+}
+
+type appendOnlyText string
+
+func (text appendOnlyText) AppendText(buffer []byte) ([]byte, error) {
+	return append(buffer, text...), nil
 }
 
 type incrementingTextCode int
@@ -479,4 +560,11 @@ type incrementingTextCode int
 func (c *incrementingTextCode) MarshalText() ([]byte, error) {
 	*c = *c + 1
 	return fmt.Appendf(nil, "C%d", *c), nil
+}
+
+type incrementingAppendCode int
+
+func (c *incrementingAppendCode) AppendText(buffer []byte) ([]byte, error) {
+	*c = *c + 1
+	return fmt.Appendf(buffer, "C%d", *c), nil
 }

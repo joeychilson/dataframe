@@ -236,9 +236,9 @@ func NewWriter(w io.Writer) *Writer {
 	return &Writer{Comma: ',', Header: true, output: w}
 }
 
-// Write serializes f to CSV. Values implementing encoding.TextMarshaler
-// control their text form. Unsupported element types return an error wrapping
-// dataframe.ErrUnsupported.
+// Write serializes f to CSV. Values implementing encoding.TextAppender or
+// encoding.TextMarshaler control their text form, with TextAppender preferred.
+// Unsupported element types return an error wrapping dataframe.ErrUnsupported.
 func (w *Writer) Write(f dataframe.Frame) error {
 	writer, err := w.configuredWriter()
 	if err != nil {
@@ -277,8 +277,8 @@ func (w *Writer) Write(f dataframe.Frame) error {
 
 // WriteRecords writes records of non-pointer struct type T using the same `df`
 // tags as dataframe.FromRecords. Pointer and absent series.Optional fields
-// write NullString. Values implementing encoding.TextMarshaler control their
-// text form.
+// write NullString. Values implementing encoding.TextAppender or
+// encoding.TextMarshaler control their text form, with TextAppender preferred.
 func (w *Writer) WriteRecords[T any](records []T) error {
 	typeOf := reflect.TypeFor[T]()
 	fields, err := record.Describe(typeOf, dataframe.ErrInvalidRecord, dataframe.ErrInvalidName, dataframe.ErrColumnConflict)
@@ -302,28 +302,36 @@ func (w *Writer) WriteRecords[T any](records []T) error {
 		}
 	}
 
+	textAppender := reflect.TypeFor[encoding.TextAppender]()
 	textMarshaler := reflect.TypeFor[encoding.TextMarshaler]()
-	type fieldOffset struct {
-		start int
-		end   int
+	type fieldEncoder struct {
+		start       int
+		end         int
+		buffered    bool
+		appendsText bool
 	}
-	var numericKinds []reflect.Kind
-	var offsets []fieldOffset
+	var encoders []fieldEncoder
 	for i, field := range fields {
 		valueType := field.ValueType
-		if valueType.Implements(textMarshaler) || reflect.PointerTo(valueType).Implements(textMarshaler) {
+		appendsText := false
+		switch {
+		case valueType.Implements(textAppender) || reflect.PointerTo(valueType).Implements(textAppender):
+			appendsText = true
+		case valueType.Implements(textMarshaler) || reflect.PointerTo(valueType).Implements(textMarshaler):
 			continue
-		}
-		switch valueType.Kind() {
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
-			reflect.Float32, reflect.Float64:
-			if numericKinds == nil {
-				numericKinds = make([]reflect.Kind, len(fields))
-				offsets = make([]fieldOffset, len(fields))
+		default:
+			switch valueType.Kind() {
+			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+				reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+				reflect.Float32, reflect.Float64:
+			default:
+				continue
 			}
-			numericKinds[i] = valueType.Kind()
 		}
+		if encoders == nil {
+			encoders = make([]fieldEncoder, len(fields))
+		}
+		encoders[i] = fieldEncoder{buffered: true, appendsText: appendsText}
 	}
 
 	values := reflect.ValueOf(records)
@@ -336,26 +344,22 @@ func (w *Writer) WriteRecords[T any](records []T) error {
 			fieldValue, present := field.Extract(value)
 			if !present {
 				encoded[fieldIndex] = w.NullString
-				if numericKinds != nil {
-					offsets[fieldIndex].end = 0
+				if encoders != nil {
+					encoders[fieldIndex].start = -1
 				}
 				continue
 			}
-			if numericKinds != nil && numericKinds[fieldIndex] != reflect.Invalid {
-				kind := numericKinds[fieldIndex]
-				offsets[fieldIndex].start = len(buffer)
-				switch kind {
-				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-					buffer = strconv.AppendInt(buffer, fieldValue.Int(), 10)
-				case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-					buffer = strconv.AppendUint(buffer, fieldValue.Uint(), 10)
-				case reflect.Float32:
-					buffer = strconv.AppendFloat(buffer, fieldValue.Float(), 'g', -1, 32)
-				case reflect.Float64:
-					buffer = strconv.AppendFloat(buffer, fieldValue.Float(), 'g', -1, 64)
+			if encoders != nil {
+				encoder := &encoders[fieldIndex]
+				if encoder.buffered {
+					encoder.start = len(buffer)
+					buffer, err = appendBufferedValue(buffer, fieldValue, encoder.appendsText)
+					if err != nil {
+						return fmt.Errorf("csv: row %d column %q: %w", row, field.Name, err)
+					}
+					encoder.end = len(buffer)
+					continue
 				}
-				offsets[fieldIndex].end = len(buffer)
-				continue
 			}
 			text, err := marshalReflectValue(fieldValue)
 			if err != nil {
@@ -363,11 +367,11 @@ func (w *Writer) WriteRecords[T any](records []T) error {
 			}
 			encoded[fieldIndex] = text
 		}
-		if len(buffer) > 0 {
+		if encoders != nil {
 			text := string(buffer)
-			for i, kind := range numericKinds {
-				if kind != reflect.Invalid && offsets[i].end > 0 {
-					encoded[i] = text[offsets[i].start:offsets[i].end]
+			for i, encoder := range encoders {
+				if encoder.buffered && encoder.start >= 0 {
+					encoded[i] = text[encoder.start:encoder.end]
 				}
 			}
 		}
@@ -606,6 +610,12 @@ func marshalReflectValue(value reflect.Value) (string, error) {
 		}
 		value = value.Elem()
 	}
+	textAppender := reflect.TypeFor[encoding.TextAppender]()
+	pointerType := reflect.PointerTo(value.Type())
+	if value.Type().Implements(textAppender) || pointerType.Implements(textAppender) {
+		text, err := appendBufferedValue(nil, value, true)
+		return string(text), err
+	}
 	textMarshaler := reflect.TypeFor[encoding.TextMarshaler]()
 	if value.Type().Implements(textMarshaler) {
 		if value.Kind() == reflect.Pointer && value.IsNil() {
@@ -614,7 +624,6 @@ func marshalReflectValue(value reflect.Value) (string, error) {
 		text, err := value.Interface().(encoding.TextMarshaler).MarshalText()
 		return string(text), err
 	}
-	pointerType := reflect.PointerTo(value.Type())
 	if pointerType.Implements(textMarshaler) {
 		pointer := reflect.New(value.Type())
 		pointer.Elem().Set(value)
@@ -637,6 +646,43 @@ func marshalReflectValue(value reflect.Value) (string, error) {
 		return strconv.FormatFloat(value.Float(), 'g', -1, 64), nil
 	default:
 		return "", fmt.Errorf("%w: cannot encode %v", dataframe.ErrUnsupported, value.Type())
+	}
+}
+
+func appendBufferedValue(buffer []byte, value reflect.Value, appendsText bool) ([]byte, error) {
+	if appendsText {
+		for value.Kind() == reflect.Interface {
+			if value.IsNil() {
+				return buffer, fmt.Errorf("%w: cannot encode a present nil interface", dataframe.ErrUnsupported)
+			}
+			value = value.Elem()
+		}
+		if value.Kind() == reflect.Pointer && value.IsNil() {
+			return buffer, fmt.Errorf("%w: cannot encode nil %v", dataframe.ErrUnsupported, value.Type())
+		}
+		textAppender := reflect.TypeFor[encoding.TextAppender]()
+		if value.Type().Implements(textAppender) {
+			return value.Interface().(encoding.TextAppender).AppendText(buffer)
+		}
+		pointerType := reflect.PointerTo(value.Type())
+		if pointerType.Implements(textAppender) {
+			pointer := reflect.New(value.Type())
+			pointer.Elem().Set(value)
+			return pointer.Interface().(encoding.TextAppender).AppendText(buffer)
+		}
+		return buffer, fmt.Errorf("%w: cannot encode %v", dataframe.ErrUnsupported, value.Type())
+	}
+	switch value.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return strconv.AppendInt(buffer, value.Int(), 10), nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return strconv.AppendUint(buffer, value.Uint(), 10), nil
+	case reflect.Float32:
+		return strconv.AppendFloat(buffer, value.Float(), 'g', -1, 32), nil
+	case reflect.Float64:
+		return strconv.AppendFloat(buffer, value.Float(), 'g', -1, 64), nil
+	default:
+		return buffer, fmt.Errorf("%w: cannot encode %v", dataframe.ErrUnsupported, value.Type())
 	}
 }
 

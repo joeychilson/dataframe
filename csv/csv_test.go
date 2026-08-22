@@ -69,6 +69,13 @@ func TestReadInferenceEdges(t *testing.T) {
 	if frame.Schema()[0].Type != reflect.TypeFor[int64]() {
 		t.Fatalf("numeric 0/1 inferred as %v", frame.Schema()[0].Type)
 	}
+	values, err := frame.Column[int64]("column1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := values.Values(); !slices.Equal(got, []int64{1, 0}) {
+		t.Fatalf("headerless values = %v", got)
+	}
 
 	reader = NewReader(strings.NewReader("value\n\"\"\n"))
 	reader.NullValues = nil
@@ -104,6 +111,33 @@ func TestReadInferRowsAndErrors(t *testing.T) {
 	}
 	if _, err := Read(strings.NewReader("\"\",b\n1,2\n")); !errors.Is(err, dataframe.ErrInvalidName) {
 		t.Fatalf("empty header error = %v", err)
+	}
+	reader = NewReader(strings.NewReader("a,a\n1\n"))
+	reader.FieldsPerRecord = -1
+	if _, err := reader.Read(); !errors.Is(err, dataframe.ErrColumnConflict) {
+		t.Fatalf("header and ragged error = %v", err)
+	}
+}
+
+func TestReadAcrossInputBlocks(t *testing.T) {
+	var input strings.Builder
+	input.WriteString("id,name\n")
+	for i := 0; i <= csvInputTargetBlockFields/2; i++ {
+		fmt.Fprintf(&input, "%d,value\n", i)
+	}
+	frame, err := Read(strings.NewReader(input.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := frame.Len(), csvInputTargetBlockFields/2+1; got != want {
+		t.Fatalf("row count = %d, want %d", got, want)
+	}
+	ids, err := frame.Column[int64]("id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value, _ := ids.At(ids.Len() - 1); value != csvInputTargetBlockFields/2 {
+		t.Fatalf("last id = %d, want %d", value, csvInputTargetBlockFields/2)
 	}
 }
 

@@ -86,7 +86,7 @@ func (r *Reader) Read() (dataframe.Frame, error) {
 		return dataframe.Frame{}, nil
 	}
 	nulls := makeStringSet(r.NullValues)
-	sampleRows := len(input.rows)
+	sampleRows := input.rowCount
 	if r.InferRows > 0 {
 		sampleRows = min(sampleRows, r.InferRows)
 	}
@@ -98,7 +98,7 @@ func (r *Reader) Read() (dataframe.Frame, error) {
 		intPossible := true
 		floatPossible := true
 		for row := 0; row < sampleRows; row++ {
-			text := input.rows[row][columnIndex]
+			text := input.field(row, columnIndex)
 			if _, null := nulls[text]; null {
 				continue
 			}
@@ -131,7 +131,7 @@ func (r *Reader) Read() (dataframe.Frame, error) {
 
 		switch kind {
 		case inferBool:
-			columns[columnIndex], err = parsedColumn(name, input.rows, columnIndex, nulls, func(text string) (bool, error) {
+			columns[columnIndex], err = parsedColumn(name, input, columnIndex, nulls, func(text string) (bool, error) {
 				value, ok := parseBool(text)
 				if !ok {
 					return false, fmt.Errorf("invalid boolean %q", text)
@@ -139,15 +139,15 @@ func (r *Reader) Read() (dataframe.Frame, error) {
 				return value, nil
 			})
 		case inferInt:
-			columns[columnIndex], err = parsedColumn(name, input.rows, columnIndex, nulls, func(text string) (int64, error) {
+			columns[columnIndex], err = parsedColumn(name, input, columnIndex, nulls, func(text string) (int64, error) {
 				return strconv.ParseInt(text, 10, 64)
 			})
 		case inferFloat:
-			columns[columnIndex], err = parsedColumn(name, input.rows, columnIndex, nulls, func(text string) (float64, error) {
+			columns[columnIndex], err = parsedColumn(name, input, columnIndex, nulls, func(text string) (float64, error) {
 				return strconv.ParseFloat(text, 64)
 			})
 		case inferString:
-			columns[columnIndex], err = parsedColumn(name, input.rows, columnIndex, nulls, func(text string) (string, error) {
+			columns[columnIndex], err = parsedColumn(name, input, columnIndex, nulls, func(text string) (string, error) {
 				return text, nil
 			})
 		}
@@ -173,7 +173,7 @@ func (r *Reader) ReadRecords[T any]() ([]T, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(input.names) == 0 && len(input.rows) == 0 {
+	if len(input.names) == 0 && input.rowCount == 0 {
 		return []T{}, nil
 	}
 
@@ -191,11 +191,11 @@ func (r *Reader) ReadRecords[T any]() ([]T, error) {
 	}
 
 	nulls := makeStringSet(r.NullValues)
-	records := make([]T, len(input.rows))
+	records := make([]T, input.rowCount)
 	for row := range records {
 		recordValue := reflect.ValueOf(&records[row]).Elem()
 		for i, field := range fields {
-			text := input.rows[row][fieldColumns[i]]
+			text := input.field(row, fieldColumns[i])
 			_, null := nulls[text]
 			if null {
 				if !field.Nullable() {
@@ -358,9 +358,19 @@ const (
 	inferFloat
 )
 
+// Limit rows per block by record width to avoid overallocating wide inputs.
+const csvInputTargetBlockFields = 4096
+
 type csvInput struct {
-	names []string
-	rows  [][]string
+	names     []string
+	blocks    [][]string
+	rowCount  int
+	blockRows int
+}
+
+func (input csvInput) field(row, column int) string {
+	block := input.blocks[row/input.blockRows]
+	return block[(row%input.blockRows)*len(input.names)+column]
 }
 
 func (r *Reader) readInput() (csvInput, error) {
@@ -373,25 +383,52 @@ func (r *Reader) readInput() (csvInput, error) {
 	reader.FieldsPerRecord = r.FieldsPerRecord
 	reader.LazyQuotes = r.LazyQuotes
 	reader.TrimLeadingSpace = r.TrimLeadingSpace
-	records, err := reader.ReadAll()
+	reader.ReuseRecord = true
+
+	first, err := reader.Read()
+	if err == io.EOF {
+		return csvInput{}, nil
+	}
 	if err != nil {
 		return csvInput{}, err
 	}
-	if len(records) == 0 {
-		return csvInput{}, nil
-	}
 
-	result := csvInput{}
+	width := len(first)
+	result := csvInput{blockRows: max(1, csvInputTargetBlockFields/width)}
 	if r.Header {
-		result.names = slices.Clone(records[0])
-		result.rows = records[1:]
+		result.names = slices.Clone(first)
 	} else {
-		result.rows = records
-		result.names = make([]string, len(records[0]))
+		result.names = make([]string, width)
 		for i := range result.names {
 			result.names[i] = fmt.Sprintf("column%d", i+1)
 		}
+		result.blocks = append(result.blocks, make([]string, 0, result.blockRows*width))
+		result.blocks[0] = append(result.blocks[0], first...)
+		result.rowCount = 1
 	}
+
+	raggedRow := -1
+	raggedWidth := 0
+	for {
+		fields, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return csvInput{}, err
+		}
+		if raggedRow < 0 && len(fields) != width {
+			raggedRow = result.rowCount
+			raggedWidth = len(fields)
+		}
+		if result.rowCount%result.blockRows == 0 {
+			result.blocks = append(result.blocks, make([]string, 0, result.blockRows*width))
+		}
+		block := len(result.blocks) - 1
+		result.blocks[block] = append(result.blocks[block], fields...)
+		result.rowCount++
+	}
+
 	names := make(map[string]struct{}, len(result.names))
 	for i, name := range result.names {
 		if name == "" {
@@ -402,20 +439,18 @@ func (r *Reader) readInput() (csvInput, error) {
 		}
 		names[name] = struct{}{}
 	}
-	for row, values := range result.rows {
-		if len(values) != len(result.names) {
-			return csvInput{}, fmt.Errorf("%w: CSV row %d has %d fields, want %d", dataframe.ErrRowCount, row, len(values), len(result.names))
-		}
+	if raggedRow >= 0 {
+		return csvInput{}, fmt.Errorf("%w: CSV row %d has %d fields, want %d", dataframe.ErrRowCount, raggedRow, raggedWidth, width)
 	}
 	return result, nil
 }
 
-func parsedColumn[T any](name string, rows [][]string, column int, nulls map[string]struct{}, parse func(string) (T, error)) (dataframe.ColumnSpec, error) {
-	values := make([]T, len(rows))
-	validity := make([]bool, len(rows))
+func parsedColumn[T any](name string, input csvInput, column int, nulls map[string]struct{}, parse func(string) (T, error)) (dataframe.ColumnSpec, error) {
+	values := make([]T, input.rowCount)
+	validity := make([]bool, input.rowCount)
 	nullable := false
-	for row := range rows {
-		text := rows[row][column]
+	for row := range input.rowCount {
+		text := input.field(row, column)
 		if _, null := nulls[text]; null {
 			nullable = true
 			continue

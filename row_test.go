@@ -106,6 +106,24 @@ func TestFromRecordsAndRecords(t *testing.T) {
 	}
 }
 
+func TestRecordRoundTripPreservesPresentNil(t *testing.T) {
+	type record struct {
+		Value    any
+		Optional series.Optional[any]
+	}
+	frame, err := FromRecords([]record{{Optional: series.Some[any](nil)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := frame.Records[record]()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].Value != nil || !records[0].Optional.Valid || records[0].Optional.Value != nil {
+		t.Fatalf("round trip = %#v", records)
+	}
+}
+
 func TestFromRecordsUsesTypedStorageForBuiltins(t *testing.T) {
 	type recordID int
 	type record struct {

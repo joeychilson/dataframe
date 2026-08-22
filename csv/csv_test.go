@@ -245,6 +245,37 @@ func TestWriteRecordsDoesNotMutateTextMarshaler(t *testing.T) {
 	}
 }
 
+func TestWriteRecordsTreatsNilInterfacesAsPresent(t *testing.T) {
+	tests := []struct {
+		name  string
+		write func(*Writer) error
+	}{
+		{
+			name: "plain",
+			write: func(writer *Writer) error {
+				return writer.WriteRecords([]struct {
+					Value any `df:"value"`
+				}{{}})
+			},
+		},
+		{
+			name: "optional",
+			write: func(writer *Writer) error {
+				return writer.WriteRecords([]struct {
+					Value series.Optional[any] `df:"value"`
+				}{{Value: series.Some[any](nil)}})
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.write(NewWriter(&strings.Builder{})); !errors.Is(err, dataframe.ErrUnsupported) {
+				t.Fatalf("present nil error = %v, want ErrUnsupported", err)
+			}
+		})
+	}
+}
+
 func TestReadWriteConvenienceAndConfiguration(t *testing.T) {
 	frame, err := dataframe.New(dataframe.Column("id", []int{1}))
 	if err != nil {

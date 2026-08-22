@@ -189,21 +189,13 @@ func (r *Reader) ReadRecords[T any]() ([]T, error) {
 		for i, field := range fields {
 			text := input.rows[row][fieldColumns[i]]
 			_, null := nulls[text]
-			destination := recordValue.FieldByIndex(field.Index)
 			if null {
-				if field.Kind == record.Value {
+				if !field.Nullable() {
 					return nil, fmt.Errorf("%w: null in non-null field %s at row %d", dataframe.ErrInvalidRecord, field.Name, row)
 				}
 				continue
 			}
-			switch field.Kind {
-			case record.Pointer:
-				destination.Set(reflect.New(field.ValueType))
-				destination = destination.Elem()
-			case record.Optional:
-				destination.Field(1).SetBool(true)
-				destination = destination.Field(0)
-			}
+			destination := field.Destination(recordValue)
 			if err := unmarshalValue(destination, text); err != nil {
 				return nil, fmt.Errorf("csv: row %d column %q: %w", row, field.Name, err)
 			}
@@ -301,20 +293,10 @@ func (w *Writer) WriteRecords[T any](records []T) error {
 	for row := range records {
 		value := values.Index(row)
 		for fieldIndex, field := range fields {
-			fieldValue := value.FieldByIndex(field.Index)
-			switch field.Kind {
-			case record.Pointer:
-				if fieldValue.IsNil() {
-					encoded[fieldIndex] = w.NullString
-					continue
-				}
-				fieldValue = fieldValue.Elem()
-			case record.Optional:
-				if !fieldValue.Field(1).Bool() {
-					encoded[fieldIndex] = w.NullString
-					continue
-				}
-				fieldValue = fieldValue.Field(0)
+			fieldValue, present := field.Extract(value)
+			if !present {
+				encoded[fieldIndex] = w.NullString
+				continue
 			}
 			text, err := marshalReflectValue(fieldValue)
 			if err != nil {

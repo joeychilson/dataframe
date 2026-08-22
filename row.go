@@ -91,22 +91,14 @@ func FromRecords[T any](records []T) (Frame, error) {
 	for i, field := range fields {
 		values := reflect.MakeSlice(reflect.SliceOf(field.ValueType), len(records), len(records))
 		var validity []bool
-		if field.Kind != record.Value {
+		if field.Nullable() {
 			validity = make([]bool, len(records))
 		}
 		for row := range records {
-			value := recordValues.Index(row).FieldByIndex(field.Index)
-			switch field.Kind {
-			case record.Value:
+			value, present := field.Extract(recordValues.Index(row))
+			if present {
 				values.Index(row).Set(value)
-			case record.Pointer:
-				if !value.IsNil() {
-					values.Index(row).Set(value.Elem())
-					validity[row] = true
-				}
-			case record.Optional:
-				if value.Field(1).Bool() {
-					values.Index(row).Set(value.Field(0))
+				if validity != nil {
 					validity[row] = true
 				}
 			}
@@ -143,29 +135,15 @@ func (f Frame) Records[T any]() ([]T, error) {
 		recordValue := reflect.ValueOf(&records[row]).Elem()
 		for i, field := range fields {
 			value, present := columns[i].columnAt(row)
-			destination := recordValue.FieldByIndex(field.Index)
-			switch field.Kind {
-			case record.Value:
-				if !present {
+			if !present {
+				if !field.Nullable() {
 					return nil, fmt.Errorf("%w: null in non-null field %s at row %d", ErrInvalidRecord, field.Name, row)
 				}
-				if value != nil {
-					destination.Set(reflect.ValueOf(value))
-				}
-			case record.Pointer:
-				if present {
-					destination.Set(reflect.New(field.ValueType))
-					if value != nil {
-						destination.Elem().Set(reflect.ValueOf(value))
-					}
-				}
-			case record.Optional:
-				if present {
-					if value != nil {
-						destination.Field(0).Set(reflect.ValueOf(value))
-					}
-					destination.Field(1).SetBool(true)
-				}
+				continue
+			}
+			destination := field.Destination(recordValue)
+			if value != nil {
+				destination.Set(reflect.ValueOf(value))
 			}
 		}
 	}

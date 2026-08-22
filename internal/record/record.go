@@ -11,28 +11,67 @@ import (
 	"github.com/joeychilson/dataframe/series"
 )
 
-// Kind describes how a record field represents presence.
-type Kind uint8
+type kind uint8
 
 const (
-	// Value is an ordinary non-null field.
-	Value Kind = iota
-	// Pointer is a nullable pointer field whose element is the column value.
-	Pointer
-	// Optional is a nullable series.Optional field.
-	Optional
+	valueKind kind = iota
+	pointerKind
+	optionalKind
 )
 
 // Field describes one mapped record field.
 type Field struct {
 	// Name is the mapped column name.
 	Name string
-	// Index is the reflection index path from the record root.
-	Index []int
 	// ValueType is the column type after removing the nullable wrapper.
 	ValueType reflect.Type
-	// Kind describes the field's representation of presence.
-	Kind Kind
+	index     []int
+	kind      kind
+}
+
+// Nullable reports whether the field can represent an absent value.
+func (f Field) Nullable() bool {
+	return f.kind != valueKind
+}
+
+// Extract returns the field's unwrapped value and whether it is present.
+// Ordinary value fields are always present, including nil interface values.
+func (f Field) Extract(record reflect.Value) (reflect.Value, bool) {
+	value := record.FieldByIndex(f.index)
+	switch f.kind {
+	case valueKind:
+		return value, true
+	case pointerKind:
+		if value.IsNil() {
+			return reflect.Value{}, false
+		}
+		return value.Elem(), true
+	case optionalKind:
+		if !value.Field(1).Bool() {
+			return reflect.Value{}, false
+		}
+		return value.Field(0), true
+	default:
+		panic("record: invalid field kind")
+	}
+}
+
+// Destination returns the addressable unwrapped destination for a present
+// field value. Pointer storage is allocated and Optional validity is set.
+func (f Field) Destination(record reflect.Value) reflect.Value {
+	destination := record.FieldByIndex(f.index)
+	switch f.kind {
+	case valueKind:
+		return destination
+	case pointerKind:
+		destination.Set(reflect.New(f.ValueType))
+		return destination.Elem()
+	case optionalKind:
+		destination.Field(1).SetBool(true)
+		return destination.Field(0)
+	default:
+		panic("record: invalid field kind")
+	}
 }
 
 // Describe returns the mapped fields of a non-pointer struct type. The caller
@@ -74,13 +113,13 @@ func Describe(typeOf reflect.Type, invalidRecord, invalidName, columnConflict er
 				return fmt.Errorf("%w: record field name %q", columnConflict, name)
 			}
 
-			described := Field{Name: name, Index: index, ValueType: field.Type}
+			described := Field{Name: name, index: index, ValueType: field.Type}
 			switch {
 			case field.Type.Kind() == reflect.Pointer:
-				described.Kind = Pointer
+				described.kind = pointerKind
 				described.ValueType = field.Type.Elem()
 			case isOptional(field.Type):
-				described.Kind = Optional
+				described.kind = optionalKind
 				described.ValueType = field.Type.Field(0).Type
 			}
 			names[name] = struct{}{}

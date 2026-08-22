@@ -120,6 +120,29 @@ func TestSemiAndAntiJoin(t *testing.T) {
 	}
 }
 
+func TestSemiAndAntiJoinIgnoreOutputColumnConflicts(t *testing.T) {
+	left, err := New(Column("key", []int{1}), Column("same", []string{"left"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := New(Column("key", []int{1}), Column("same", []string{"right"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	semi, err := left.SemiJoin(right, Using[int]("key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	anti, err := left.AntiJoin(right, Using[int]("key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if semi.Len() != 1 || anti.Len() != 0 || !slices.Equal(semi.Names(), left.Names()) || !slices.Equal(anti.Names(), left.Names()) {
+		t.Fatalf("semi/anti shapes = %dx%d and %dx%d", semi.Len(), semi.Width(), anti.Len(), anti.Width())
+	}
+}
+
 func TestUsingColumnsAndCustomHasher(t *testing.T) {
 	left, err := New(Column("left_key", [][]int{{1}, {2}}), Column("left", []string{"a", "b"}))
 	if err != nil {

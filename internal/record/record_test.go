@@ -33,15 +33,15 @@ func TestDescribe(t *testing.T) {
 	want := []struct {
 		name      string
 		valueType reflect.Type
-		kind      Kind
+		kind      kind
 	}{
-		{name: "active", valueType: reflect.TypeFor[bool](), kind: Value},
-		{name: "id", valueType: reflect.TypeFor[int](), kind: Value},
-		{name: "name", valueType: reflect.TypeFor[string](), kind: Pointer},
-		{name: "score", valueType: reflect.TypeFor[float64](), kind: Optional},
+		{name: "active", valueType: reflect.TypeFor[bool](), kind: valueKind},
+		{name: "id", valueType: reflect.TypeFor[int](), kind: valueKind},
+		{name: "name", valueType: reflect.TypeFor[string](), kind: pointerKind},
+		{name: "score", valueType: reflect.TypeFor[float64](), kind: optionalKind},
 	}
 	for i, field := range fields {
-		if field.Name != want[i].name || field.ValueType != want[i].valueType || field.Kind != want[i].kind {
+		if field.Name != want[i].name || field.ValueType != want[i].valueType || field.kind != want[i].kind {
 			t.Fatalf("field %d = %#v", i, field)
 		}
 	}
@@ -60,5 +60,50 @@ func TestDescribeErrors(t *testing.T) {
 	}
 	if _, err := Describe(reflect.TypeFor[duplicate](), invalid, invalidName, conflict); !errors.Is(err, conflict) {
 		t.Fatalf("duplicate error = %v", err)
+	}
+}
+
+func TestFieldPresenceTransitions(t *testing.T) {
+	type value struct {
+		Plain    any
+		Pointer  *string
+		Optional series.Optional[int]
+	}
+	fields, err := Describe(
+		reflect.TypeFor[value](),
+		errors.New("invalid record"),
+		errors.New("invalid name"),
+		errors.New("conflict"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	source := value{Optional: series.Optional[int]{Value: 42}}
+	sourceValue := reflect.ValueOf(source)
+	plain, present := fields[0].Extract(sourceValue)
+	if !present || plain.Kind() != reflect.Interface || !plain.IsNil() {
+		t.Fatalf("nil interface extraction = (%v, %t), want present nil interface", plain, present)
+	}
+	if _, present := fields[1].Extract(sourceValue); present {
+		t.Fatal("nil pointer extracted as present")
+	}
+	if _, present := fields[2].Extract(sourceValue); present {
+		t.Fatal("invalid Optional payload extracted as present")
+	}
+
+	destination := value{}
+	destinationValue := reflect.ValueOf(&destination).Elem()
+	plainDestination := fields[0].Destination(destinationValue)
+	pointerDestination := fields[1].Destination(destinationValue)
+	optionalDestination := fields[2].Destination(destinationValue)
+	if !plainDestination.CanAddr() || !pointerDestination.CanAddr() || !optionalDestination.CanAddr() {
+		t.Fatal("Destination returned an unaddressable value")
+	}
+	plainDestination.Set(reflect.ValueOf("plain"))
+	pointerDestination.SetString("pointer")
+	optionalDestination.SetInt(7)
+	if destination.Plain != "plain" || destination.Pointer == nil || *destination.Pointer != "pointer" || destination.Optional != series.Some(7) {
+		t.Fatalf("destination transitions = %#v", destination)
 	}
 }

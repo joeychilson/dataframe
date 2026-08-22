@@ -8,12 +8,26 @@ import (
 
 type foldedStringHasher struct{}
 
+type largeKey [16]uint64
+
+type largeValue [128]uint64
+
+type collidingLargeHasher struct{}
+
 func (foldedStringHasher) Hash(hash *maphash.Hash, _ string) {
 	hash.WriteByte(0)
 }
 
 func (foldedStringHasher) Equal(left, right string) bool {
 	return strings.EqualFold(left, right)
+}
+
+func (collidingLargeHasher) Hash(hash *maphash.Hash, _ largeKey) {
+	hash.WriteByte(0)
+}
+
+func (collidingLargeHasher) Equal(left, right largeKey) bool {
+	return left == right
 }
 
 func TestMap(t *testing.T) {
@@ -48,4 +62,39 @@ func TestNewPanicsForNilHasher(t *testing.T) {
 		}
 	}()
 	New[string, int](nil, 0)
+}
+
+func BenchmarkLargeCollidingEntries(b *testing.B) {
+	const size = 64
+	keys := make([]largeKey, size)
+	stored := largeValue{1}
+	values := New[largeKey, largeValue](collidingLargeHasher{}, size)
+	for i := range keys {
+		keys[i][0] = uint64(i + 1)
+		values.Set(keys[i], stored)
+	}
+
+	b.Run("GetMiss", func(b *testing.B) {
+		b.ReportAllocs()
+		var result largeValue
+		var found bool
+		for b.Loop() {
+			result, found = values.Get(largeKey{})
+		}
+		if found || result != (largeValue{}) {
+			b.Fatal("Get found missing key")
+		}
+	})
+
+	b.Run("LoadOrStoreHit", func(b *testing.B) {
+		b.ReportAllocs()
+		var result largeValue
+		var loaded bool
+		for b.Loop() {
+			result, loaded = values.LoadOrStore(keys[0], largeValue{})
+		}
+		if !loaded || result != stored {
+			b.Fatal("LoadOrStore did not load existing value")
+		}
+	})
 }

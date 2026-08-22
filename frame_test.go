@@ -279,6 +279,32 @@ func TestFrameDistinctSeparatesPresentNilAndNull(t *testing.T) {
 	}
 }
 
+func TestFrameDistinctSingleColumnPreservesOrderAndNulls(t *testing.T) {
+	values, err := series.NewNullable(
+		[]int{2, 1, 2, 0, 1, 0},
+		[]bool{true, true, true, false, true, false},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, err := New(ColumnFromSeries("value", values))
+	if err != nil {
+		t.Fatal(err)
+	}
+	distinct, err := frame.Distinct()
+	if err != nil {
+		t.Fatal(err)
+	}
+	distinctValues, err := distinct.Column[int]("value")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []series.Optional[int]{series.Some(2), series.Some(1), series.None[int]()}
+	if got := distinctValues.Optionals(); !slices.Equal(got, want) {
+		t.Fatalf("Distinct values = %v, want %v", got, want)
+	}
+}
+
 func TestFrameConcat(t *testing.T) {
 	left, err := New(Column("id", []int{1}), Column("name", []string{"a"}))
 	if err != nil {
@@ -330,19 +356,31 @@ func BenchmarkFrameFilter(b *testing.B) {
 }
 
 func BenchmarkFrameDistinct(b *testing.B) {
-	values := make([]int, 10_000)
-	for i := range values {
-		values[i] = i % 100
+	const size = 10_000
+	benchmarks := []struct {
+		name        string
+		cardinality int
+	}{
+		{name: "100-unique", cardinality: 100},
+		{name: "all-unique", cardinality: size},
 	}
-	frame, err := New(Column("value", values))
-	if err != nil {
-		b.Fatal(err)
-	}
-	b.ReportAllocs()
-	for b.Loop() {
-		if _, err := frame.Distinct(); err != nil {
-			b.Fatal(err)
-		}
+	for _, benchmark := range benchmarks {
+		b.Run(benchmark.name, func(b *testing.B) {
+			values := make([]int, size)
+			for i := range values {
+				values[i] = i % benchmark.cardinality
+			}
+			frame, err := New(Column("value", values))
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := frame.Distinct(); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
 

@@ -356,6 +356,38 @@ func (f Frame) Distinct() (Frame, error) {
 	if f.Width() == 0 {
 		return f.Slice(0, 1), nil
 	}
+	if f.Width() == 1 {
+		column := f.columns[0]
+		if !column.columnType().Comparable() {
+			return Frame{}, fmt.Errorf("%w: column %q has type %v", ErrUnsupported, column.columnName(), column.columnType())
+		}
+
+		seen := make(map[any]struct{}, f.Len())
+		rows := make([]int, 0, f.Len())
+		nullSeen := false
+		for row := 0; row < f.Len(); row++ {
+			value, present := column.columnAt(row)
+			if !present {
+				if !nullSeen {
+					nullSeen = true
+					rows = append(rows, row)
+				}
+				continue
+			}
+			if value != nil {
+				valueOf := reflect.ValueOf(value)
+				if !valueOf.Comparable() {
+					return Frame{}, fmt.Errorf("%w: column %q row %d contains incomparable dynamic type %v", ErrUnsupported, column.columnName(), row, valueOf.Type())
+				}
+			}
+			if _, exists := seen[value]; exists {
+				continue
+			}
+			seen[value] = struct{}{}
+			rows = append(rows, row)
+		}
+		return f.Take(rows), nil
+	}
 
 	fields := make([]reflect.StructField, 0, f.Width()*2)
 	for i, column := range f.columns {

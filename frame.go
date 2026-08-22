@@ -361,6 +361,9 @@ func (f Frame) Distinct() (Frame, error) {
 		if !column.columnType().Comparable() {
 			return Frame{}, fmt.Errorf("%w: column %q has type %v", ErrUnsupported, column.columnName(), column.columnType())
 		}
+		if rows, ok := distinctBuiltinRows(column); ok {
+			return f.Take(rows), nil
+		}
 
 		seen := make(map[any]struct{}, f.Len())
 		rows := make([]int, 0, f.Len())
@@ -435,26 +438,7 @@ func (f Frame) DistinctBy[K comparable](key series.Series[K]) Frame {
 	if key.Len() != f.Len() {
 		panic(fmt.Sprintf("dataframe: DistinctBy: length mismatch: frame=%d key=%d", f.Len(), key.Len()))
 	}
-	seen := make(map[K]struct{}, key.Len())
-	nullSeen := false
-	rows := make([]int, 0, key.Len())
-	for i := 0; i < key.Len(); i++ {
-		value, present := key.At(i)
-		if !present {
-			if nullSeen {
-				continue
-			}
-			nullSeen = true
-			rows = append(rows, i)
-			continue
-		}
-		if _, exists := seen[value]; exists {
-			continue
-		}
-		seen[value] = struct{}{}
-		rows = append(rows, i)
-	}
-	return f.Take(rows)
+	return f.Take(distinctRows(key))
 }
 
 // DistinctByUsing is DistinctBy for non-comparable keys or custom equality. It
@@ -589,6 +573,69 @@ func (c columnSpec[T]) columnConcat(others []ColumnSpec) (ColumnSpec, error) {
 	}
 	c.values = c.values.Concat(parts...)
 	return c, nil
+}
+
+func distinctBuiltinRows(column ColumnSpec) ([]int, bool) {
+	switch column := column.(type) {
+	case columnSpec[bool]:
+		return distinctRows(column.values), true
+	case columnSpec[string]:
+		return distinctRows(column.values), true
+	case columnSpec[int]:
+		return distinctRows(column.values), true
+	case columnSpec[int8]:
+		return distinctRows(column.values), true
+	case columnSpec[int16]:
+		return distinctRows(column.values), true
+	case columnSpec[int32]:
+		return distinctRows(column.values), true
+	case columnSpec[int64]:
+		return distinctRows(column.values), true
+	case columnSpec[uint]:
+		return distinctRows(column.values), true
+	case columnSpec[uint8]:
+		return distinctRows(column.values), true
+	case columnSpec[uint16]:
+		return distinctRows(column.values), true
+	case columnSpec[uint32]:
+		return distinctRows(column.values), true
+	case columnSpec[uint64]:
+		return distinctRows(column.values), true
+	case columnSpec[uintptr]:
+		return distinctRows(column.values), true
+	case columnSpec[float32]:
+		return distinctRows(column.values), true
+	case columnSpec[float64]:
+		return distinctRows(column.values), true
+	case columnSpec[complex64]:
+		return distinctRows(column.values), true
+	case columnSpec[complex128]:
+		return distinctRows(column.values), true
+	default:
+		return nil, false
+	}
+}
+
+func distinctRows[T comparable](values series.Series[T]) []int {
+	seen := make(map[T]struct{}, values.Len())
+	rows := make([]int, 0, values.Len())
+	nullSeen := false
+	for row := 0; row < values.Len(); row++ {
+		value, present := values.At(row)
+		if !present {
+			if !nullSeen {
+				nullSeen = true
+				rows = append(rows, row)
+			}
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		rows = append(rows, row)
+	}
+	return rows
 }
 
 func (f Frame) columnIndex(name string) int {

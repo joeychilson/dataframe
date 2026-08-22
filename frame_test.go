@@ -305,6 +305,25 @@ func TestFrameDistinctSingleColumnPreservesOrderAndNulls(t *testing.T) {
 	}
 }
 
+func TestFrameDistinctSingleDefinedColumnUsesFallback(t *testing.T) {
+	type code int
+	frame, err := New(Column("code", []code{2, 1, 2, 3, 1}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	distinct, err := frame.Distinct()
+	if err != nil {
+		t.Fatal(err)
+	}
+	values, err := distinct.Column[code]("code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := values.Values(), []code{2, 1, 3}; !slices.Equal(got, want) {
+		t.Fatalf("Distinct values = %v, want %v", got, want)
+	}
+}
+
 func TestFrameConcat(t *testing.T) {
 	left, err := New(Column("id", []int{1}), Column("name", []string{"a"}))
 	if err != nil {

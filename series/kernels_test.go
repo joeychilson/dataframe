@@ -321,6 +321,9 @@ func TestQuantileAndMedian(t *testing.T) {
 	if got, ok := Quantile(New([]float64{math.Inf(1)}), 0.5); !ok || !math.IsInf(got, 1) {
 		t.Fatalf("Quantile(+Inf) = (%v, %t), want (+Inf, true)", got, ok)
 	}
+	if got, ok := Median(New([]float64{-math.MaxFloat64, math.MaxFloat64})); !ok || got != 0 {
+		t.Fatalf("Median(extreme finite values) = (%v, %t), want (0, true)", got, ok)
+	}
 }
 
 func TestQuantilePanicsForInvalidQ(t *testing.T) {

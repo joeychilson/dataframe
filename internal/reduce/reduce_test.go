@@ -1,6 +1,9 @@
 package reduce
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 type cells[T any] struct {
 	values   []T
@@ -55,5 +58,23 @@ func TestReductionsSelectAllAndEmpty(t *testing.T) {
 	}
 	if _, present := LastPresent(values, []int{}); present {
 		t.Fatal("LastPresent(empty) reported a present value")
+	}
+}
+
+func TestMeanAvoidsIntermediateOverflow(t *testing.T) {
+	values := cells[float64]{values: []float64{math.MaxFloat64, math.MaxFloat64}}
+	for _, rows := range [][]int{nil, {0, 1}} {
+		if got, present := Mean(values, rows); got != math.MaxFloat64 || !present {
+			t.Fatalf("Mean() = (%v, %v), want (%v, true)", got, present, math.MaxFloat64)
+		}
+	}
+	opposite := cells[float64]{values: []float64{-math.MaxFloat64, math.MaxFloat64}}
+	if got, present := Mean(opposite, nil); got != 0 || !present {
+		t.Fatalf("Mean(-MaxFloat64, MaxFloat64) = (%v, %v), want (0, true)", got, present)
+	}
+
+	infinite := cells[float64]{values: []float64{math.Inf(1), math.Inf(1)}}
+	if got, present := Mean(infinite, nil); !math.IsInf(got, 1) || !present {
+		t.Fatalf("Mean(+Inf, +Inf) = (%v, %v), want (+Inf, true)", got, present)
 	}
 }

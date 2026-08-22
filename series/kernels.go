@@ -365,7 +365,7 @@ func Quantile[T Real](s Series[T], q float64) (float64, bool) {
 	if fraction == 0 || lower == upper {
 		return values[lower], true
 	}
-	return values[lower] + fraction*(values[upper]-values[lower]), true
+	return values[lower]*(1-fraction) + values[upper]*fraction, true
 }
 
 // Median returns the 0.5 quantile and whether any value is present.

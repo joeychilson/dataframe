@@ -3,6 +3,7 @@ package reduce
 
 import (
 	"cmp"
+	"math"
 	"slices"
 )
 
@@ -54,27 +55,37 @@ func Sum[T Number, S Cells[T]](values S, rows []int) (T, bool) {
 // Mean returns the arithmetic mean of present cells selected by rows and
 // whether any are present. A nil rows slice selects every cell.
 func Mean[T Real, S Cells[T]](values S, rows []int) (float64, bool) {
-	sum := 0.0
+	mean := 0.0
 	count := 0
+	add := func(value T) {
+		count++
+		converted := float64(value)
+		scale := float64(count)
+		// Choose the form whose intermediate operations stay within the inputs'
+		// finite range. The weighted form also preserves same-signed infinities.
+		if math.IsInf(mean, 0) || math.IsInf(converted, 0) || (mean < 0) != (converted < 0) {
+			mean = mean*(float64(count-1)/scale) + converted/scale
+			return
+		}
+		mean += (converted - mean) / scale
+	}
 	if rows == nil {
 		for row := 0; row < values.Len(); row++ {
 			if value, present := values.At(row); present {
-				sum += float64(value)
-				count++
+				add(value)
 			}
 		}
 	} else {
 		for _, row := range rows {
 			if value, present := values.At(row); present {
-				sum += float64(value)
-				count++
+				add(value)
 			}
 		}
 	}
 	if count == 0 {
 		return 0, false
 	}
-	return sum / float64(count), true
+	return mean, true
 }
 
 // Min returns the smallest present cell selected by rows and whether any are

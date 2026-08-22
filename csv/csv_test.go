@@ -276,6 +276,34 @@ func TestWriteRecordsTreatsNilInterfacesAsPresent(t *testing.T) {
 	}
 }
 
+func TestWriteRejectsNonemptyZeroWidthData(t *testing.T) {
+	frame, err := dataframe.FromRecords([]struct{}{{}, {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name  string
+		write func() error
+	}{
+		{name: "frame", write: func() error { return Write(&strings.Builder{}, frame) }},
+		{name: "records", write: func() error { return NewWriter(&strings.Builder{}).WriteRecords([]struct{}{{}, {}}) }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.write(); !errors.Is(err, dataframe.ErrUnsupported) {
+				t.Fatalf("error = %v, want ErrUnsupported", err)
+			}
+		})
+	}
+
+	if err := Write(&strings.Builder{}, dataframe.Frame{}); err != nil {
+		t.Fatalf("empty frame error = %v", err)
+	}
+	if err := NewWriter(&strings.Builder{}).WriteRecords([]struct{}{}); err != nil {
+		t.Fatalf("empty records error = %v", err)
+	}
+}
+
 func TestReadWriteConvenienceAndConfiguration(t *testing.T) {
 	frame, err := dataframe.New(dataframe.Column("id", []int{1}))
 	if err != nil {

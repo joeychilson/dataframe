@@ -236,6 +236,9 @@ func (w *Writer) Write(f dataframe.Frame) error {
 	if err != nil {
 		return err
 	}
+	if f.Width() == 0 && f.Len() > 0 {
+		return fmt.Errorf("%w: cannot encode %d rows without columns", dataframe.ErrUnsupported, f.Len())
+	}
 	if w.Header {
 		if err := writer.Write(f.Names()); err != nil {
 			return err
@@ -277,6 +280,9 @@ func (w *Writer) WriteRecords[T any](records []T) error {
 	writer, err := w.configuredWriter()
 	if err != nil {
 		return err
+	}
+	if len(fields) == 0 && len(records) > 0 {
+		return fmt.Errorf("%w: cannot encode %d records without fields", dataframe.ErrUnsupported, len(records))
 	}
 	if w.Header {
 		header := make([]string, len(fields))

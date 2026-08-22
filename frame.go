@@ -158,7 +158,7 @@ func (f Frame) Column[T any](name string) (series.Series[T], error) {
 	if column.typeOf != want {
 		return series.Series[T]{}, fmt.Errorf("%w: column %q has type %v, want %v", ErrColumnType, name, column.typeOf, want)
 	}
-	return typedSeriesFromColumn[T](column)
+	return typedSeriesFromColumn[T](column), nil
 }
 
 // With adds values under name or replaces the existing column in place.
@@ -593,11 +593,7 @@ func (c typedData[T]) concat(base column, others []column) (columnData, error) {
 		if other.typeOf != base.typeOf {
 			return nil, fmt.Errorf("%w: column %q type %v does not match %v", ErrSchemaMismatch, base.name, other.typeOf, base.typeOf)
 		}
-		values, err := typedSeriesFromColumn[T](other)
-		if err != nil {
-			return nil, err
-		}
-		parts[i] = values
+		parts[i] = typedSeriesFromColumn[T](other)
 	}
 	c.values = c.values.Concat(parts...)
 	return c, nil

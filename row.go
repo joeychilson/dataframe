@@ -58,11 +58,7 @@ func (r Row) Get[T any](column string) (value T, present bool, err error) {
 	if !present || dynamic == nil {
 		return value, present, nil
 	}
-	value, ok := dynamic.(T)
-	if !ok {
-		return value, false, fmt.Errorf("%w: column %q contains %T, want %v", ErrColumnType, column, dynamic, want)
-	}
-	return value, true, nil
+	return dynamic.(T), true, nil
 }
 
 // FromRecords builds a Frame from records of non-pointer struct type T. Empty
@@ -86,7 +82,7 @@ func FromRecords[T any](records []T) (Frame, error) {
 		return Frame{rowCount: len(records)}, nil
 	}
 
-	columns := make([]ColumnSpec, len(fields))
+	columns := make([]column, len(fields))
 	recordValues := reflect.ValueOf(records)
 	for i, field := range fields {
 		values := reflect.MakeSlice(reflect.SliceOf(field.ValueType), len(records), len(records))
@@ -105,7 +101,7 @@ func FromRecords[T any](records []T) (Frame, error) {
 		}
 		columns[i] = columnFromSlice(field.Name, values, validity)
 	}
-	return New(columns...)
+	return Frame{columns: columns, rowCount: len(records)}, nil
 }
 
 // Records materializes f as records of non-pointer struct type T. Extra frame

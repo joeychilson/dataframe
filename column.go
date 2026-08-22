@@ -54,13 +54,10 @@ func (c ColumnView) Nullable() bool {
 // At returns row i and whether it is present. A null cell returns nil, false.
 // It panics when i is out of range.
 func (c ColumnView) At(i int) (any, bool) {
-	if i < 0 || i >= c.Len() {
-		panic("dataframe: ColumnView.At: index out of range")
-	}
 	return c.column.values.at(i)
 }
 
-func columnFromSlice(name string, values reflect.Value, validity []bool) ColumnSpec {
+func columnFromSlice(name string, values reflect.Value, validity []bool) column {
 	switch typed := values.Interface().(type) {
 	case []bool:
 		return typedColumnFromSlice(name, typed, validity)
@@ -97,49 +94,34 @@ func columnFromSlice(name string, values reflect.Value, validity []bool) ColumnS
 	case []complex128:
 		return typedColumnFromSlice(name, typed, validity)
 	default:
-		column := reflectColumnSpec{
-			name:   name,
-			typeOf: values.Type().Elem(),
-			values: values,
-		}
+		data := reflectData{values: values}
 		if validity != nil {
-			column.validity = bitmap.FromBools(validity)
+			data.validity = bitmap.FromBools(validity)
 		}
-		return column
+		return column{
+			name:     name,
+			typeOf:   values.Type().Elem(),
+			nullable: data.validity.Initialized(),
+			length:   values.Len(),
+			values:   data,
+		}
 	}
 }
 
-func typedColumnFromSlice[T any](name string, values []T, validity []bool) ColumnSpec {
+func typedColumnFromSlice[T any](name string, values []T, validity []bool) column {
 	if validity == nil {
-		return Column(name, values)
+		return typedColumn(name, series.New(values))
 	}
 	typed, err := series.NewNullable(values, validity)
 	if err != nil {
 		panic(err)
 	}
-	return ColumnFromSeries(name, typed)
-}
-
-type reflectColumnSpec struct {
-	name     string
-	typeOf   reflect.Type
-	values   reflect.Value
-	validity bitmap.Bitmap
+	return typedColumn(name, typed)
 }
 
 type reflectData struct {
 	values   reflect.Value
 	validity bitmap.Bitmap
-}
-
-func (c reflectColumnSpec) dataframeColumnSpec() column {
-	return column{
-		name:     c.name,
-		typeOf:   c.typeOf,
-		nullable: c.validity.Initialized(),
-		length:   c.values.Len(),
-		values:   reflectData{values: c.values, validity: c.validity},
-	}
 }
 
 func (c reflectData) at(i int) (any, bool) {
@@ -168,11 +150,7 @@ func (c reflectData) take(rows []int) columnData {
 func (c reflectData) takeNullable(rows series.Series[int]) columnData {
 	values := reflect.MakeSlice(c.values.Type(), rows.Len(), rows.Len())
 	validity := bitmap.New(rows.Len())
-	for i := 0; i < rows.Len(); i++ {
-		row, present := rows.At(i)
-		if !present {
-			continue
-		}
+	for i, row := range rows.Present() {
 		values.Index(i).Set(c.values.Index(row))
 		if !c.validity.Initialized() || c.validity.At(row) {
 			validity.Set(i, true)
@@ -245,9 +223,9 @@ func (c reflectData) concat(base column, others []column) (columnData, error) {
 	return reflectData{values: values, validity: validity}, nil
 }
 
-func typedSeriesFromColumn[T any](column column) (series.Series[T], error) {
+func typedSeriesFromColumn[T any](column column) series.Series[T] {
 	if typed, ok := column.values.(typedData[T]); ok {
-		return typed.values, nil
+		return typed.values
 	}
 	values := make([]T, column.length)
 	var validity []bool
@@ -258,11 +236,7 @@ func typedSeriesFromColumn[T any](column column) (series.Series[T], error) {
 		value, present := column.values.at(i)
 		if present {
 			if value != nil {
-				converted, ok := value.(T)
-				if !ok {
-					return series.Series[T]{}, fmt.Errorf("%w: column %q contains %T, want %v", ErrColumnType, column.name, value, reflect.TypeFor[T]())
-				}
-				values[i] = converted
+				values[i] = value.(T)
 			}
 			if validity != nil {
 				validity[i] = true
@@ -270,11 +244,11 @@ func typedSeriesFromColumn[T any](column column) (series.Series[T], error) {
 		}
 	}
 	if validity == nil {
-		return series.New(values), nil
+		return series.New(values)
 	}
 	result, err := series.NewNullable(values, validity)
 	if err != nil {
 		panic(err)
 	}
-	return result, nil
+	return result
 }

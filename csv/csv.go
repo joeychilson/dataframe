@@ -302,14 +302,59 @@ func (w *Writer) WriteRecords[T any](records []T) error {
 		}
 	}
 
+	textMarshaler := reflect.TypeFor[encoding.TextMarshaler]()
+	type fieldOffset struct {
+		start int
+		end   int
+	}
+	var numericKinds []reflect.Kind
+	var offsets []fieldOffset
+	for i, field := range fields {
+		valueType := field.ValueType
+		if valueType.Implements(textMarshaler) || reflect.PointerTo(valueType).Implements(textMarshaler) {
+			continue
+		}
+		switch valueType.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+			reflect.Float32, reflect.Float64:
+			if numericKinds == nil {
+				numericKinds = make([]reflect.Kind, len(fields))
+				offsets = make([]fieldOffset, len(fields))
+			}
+			numericKinds[i] = valueType.Kind()
+		}
+	}
+
 	values := reflect.ValueOf(records)
 	encoded := make([]string, len(fields))
+	var buffer []byte
 	for row := range records {
+		buffer = buffer[:0]
 		value := values.Index(row)
 		for fieldIndex, field := range fields {
 			fieldValue, present := field.Extract(value)
 			if !present {
 				encoded[fieldIndex] = w.NullString
+				if numericKinds != nil {
+					offsets[fieldIndex].end = 0
+				}
+				continue
+			}
+			if numericKinds != nil && numericKinds[fieldIndex] != reflect.Invalid {
+				kind := numericKinds[fieldIndex]
+				offsets[fieldIndex].start = len(buffer)
+				switch kind {
+				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+					buffer = strconv.AppendInt(buffer, fieldValue.Int(), 10)
+				case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+					buffer = strconv.AppendUint(buffer, fieldValue.Uint(), 10)
+				case reflect.Float32:
+					buffer = strconv.AppendFloat(buffer, fieldValue.Float(), 'g', -1, 32)
+				case reflect.Float64:
+					buffer = strconv.AppendFloat(buffer, fieldValue.Float(), 'g', -1, 64)
+				}
+				offsets[fieldIndex].end = len(buffer)
 				continue
 			}
 			text, err := marshalReflectValue(fieldValue)
@@ -317,6 +362,14 @@ func (w *Writer) WriteRecords[T any](records []T) error {
 				return fmt.Errorf("csv: row %d column %q: %w", row, field.Name, err)
 			}
 			encoded[fieldIndex] = text
+		}
+		if len(buffer) > 0 {
+			text := string(buffer)
+			for i, kind := range numericKinds {
+				if kind != reflect.Invalid && offsets[i].end > 0 {
+					encoded[i] = text[offsets[i].start:offsets[i].end]
+				}
+			}
 		}
 		if err := writer.Write(encoded); err != nil {
 			return err

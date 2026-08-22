@@ -261,6 +261,30 @@ func TestWriteRecordsSchemaAndNulls(t *testing.T) {
 	}
 }
 
+func TestWriteRecordsFormatsNumericFields(t *testing.T) {
+	type count int16
+	type row struct {
+		Signed   count
+		Unsigned uint32
+		Ratio    *float32
+		Value    float64
+	}
+	ratio := float32(1.25)
+	records := []row{
+		{Signed: -2, Unsigned: 3, Ratio: &ratio, Value: 2.5},
+		{Signed: 4, Unsigned: 5, Value: 6.75},
+	}
+	var output strings.Builder
+	writer := NewWriter(&output)
+	writer.NullString = "NULL"
+	if err := writer.WriteRecords(records); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := output.String(), "Signed,Unsigned,Ratio,Value\n-2,3,1.25,2.5\n4,5,NULL,6.75\n"; got != want {
+		t.Fatalf("CSV = %q, want %q", got, want)
+	}
+}
+
 func TestWriteRecordsDoesNotMutateTextMarshaler(t *testing.T) {
 	type row struct {
 		Code incrementingTextCode `df:"code"`

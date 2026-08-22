@@ -368,22 +368,23 @@ func (f Frame) Distinct() (Frame, error) {
 		)
 	}
 	keyType := reflect.StructOf(fields)
+	key := reflect.New(keyType).Elem()
 	seen := make(map[any]struct{}, f.Len())
 	rows := make([]int, 0, f.Len())
 	for row := 0; row < f.Len(); row++ {
-		key := reflect.New(keyType).Elem()
 		for columnIndex, column := range f.columns {
 			value, present := column.columnAt(row)
-			if present {
-				if value != nil {
-					valueOf := reflect.ValueOf(value)
-					if !valueOf.Comparable() {
-						return Frame{}, fmt.Errorf("%w: column %q row %d contains incomparable dynamic type %v", ErrUnsupported, column.columnName(), row, valueOf.Type())
-					}
-					key.Field(columnIndex * 2).Set(valueOf)
-				}
-				key.Field(columnIndex*2 + 1).SetBool(true)
+			valueField := key.Field(columnIndex * 2)
+			key.Field(columnIndex*2 + 1).SetBool(present)
+			if !present || value == nil {
+				valueField.SetZero()
+				continue
 			}
+			valueOf := reflect.ValueOf(value)
+			if !valueOf.Comparable() {
+				return Frame{}, fmt.Errorf("%w: column %q row %d contains incomparable dynamic type %v", ErrUnsupported, column.columnName(), row, valueOf.Type())
+			}
+			valueField.Set(valueOf)
 		}
 		value := key.Interface()
 		if _, exists := seen[value]; exists {

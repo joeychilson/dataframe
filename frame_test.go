@@ -254,6 +254,31 @@ func TestFrameDistinct(t *testing.T) {
 	}
 }
 
+func TestFrameDistinctSeparatesPresentNilAndNull(t *testing.T) {
+	values, err := series.NewNullable([]any{nil, nil, nil}, []bool{true, false, true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, err := New(ColumnFromSeries("value", values))
+	if err != nil {
+		t.Fatal(err)
+	}
+	distinct, err := frame.Distinct()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := distinct.Len(); got != 2 {
+		t.Fatalf("Distinct length = %d, want 2", got)
+	}
+	distinctValues, err := distinct.Column[any]("value")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := distinctValues.Validity(); !slices.Equal(got, []bool{true, false}) {
+		t.Fatalf("Distinct validity = %v", got)
+	}
+}
+
 func TestFrameConcat(t *testing.T) {
 	left, err := New(Column("id", []int{1}), Column("name", []string{"a"}))
 	if err != nil {
@@ -301,6 +326,23 @@ func BenchmarkFrameFilter(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		_ = frame.Filter(selection)
+	}
+}
+
+func BenchmarkFrameDistinct(b *testing.B) {
+	values := make([]int, 10_000)
+	for i := range values {
+		values[i] = i % 100
+	}
+	frame, err := New(Column("value", values))
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := frame.Distinct(); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 

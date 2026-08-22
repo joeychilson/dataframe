@@ -11,6 +11,7 @@ An immutable, column-oriented dataframe API designed for Go 1.27.
 - `series` — typed nullable columns, transforms, kernels, and reductions.
 - `mask` — positional row selections constructed with `mask.New`, `mask.All`, or `mask.None`.
 - `csv` — CSV frame and record I/O.
+- `sql` — `database/sql` frame and record I/O through queries and prepared statements.
 
 ## Example
 

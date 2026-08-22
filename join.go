@@ -100,7 +100,8 @@ func UsingColumnsBy[K any](outputName, leftName, rightName string, hasher maphas
 // output name conflicts return errors. On variants produce the complete left
 // schema followed by the complete right schema. Using variants place the
 // coalesced key at the left key's position, omit the right key, and otherwise
-// retain left-then-right schema order.
+// retain left-then-right schema order. Output row-count overflow returns
+// ErrRowCount.
 func (f Frame) InnerJoin[K any](right Frame, key JoinKey[K]) (Frame, error) {
 	return joinFrames(f, right, key, innerJoin)
 }
@@ -108,7 +109,7 @@ func (f Frame) InnerJoin[K any](right Frame, key JoinKey[K]) (Frame, error) {
 // LeftJoin returns every left row once per match, or once with null right
 // values when unmatched. Rows are left-major. Invalid keys and output schemas
 // return errors. Output schema follows InnerJoin; right-side output fields are
-// nullable.
+// nullable. Output row-count overflow returns ErrRowCount.
 func (f Frame) LeftJoin[K any](right Frame, key JoinKey[K]) (Frame, error) {
 	return joinFrames(f, right, key, leftJoin)
 }
@@ -117,7 +118,7 @@ func (f Frame) LeftJoin[K any](right Frame, key JoinKey[K]) (Frame, error) {
 // values when unmatched. Rows are right-major. Invalid keys and output schemas
 // return errors. Output schema remains left then right; left-side output fields
 // are nullable. A coalesced key takes its value from the right key for an
-// unmatched right row.
+// unmatched right row. Output row-count overflow returns ErrRowCount.
 func (f Frame) RightJoin[K any](right Frame, key JoinKey[K]) (Frame, error) {
 	return joinFrames(f, right, key, rightJoin)
 }
@@ -126,7 +127,7 @@ func (f Frame) RightJoin[K any](right Frame, key JoinKey[K]) (Frame, error) {
 // row, then emits unmatched right rows in right-row order. Invalid keys and
 // output schemas return errors. Output schema follows InnerJoin; non-key fields
 // from both sides are nullable. A coalesced key takes the present key from
-// either side.
+// either side. Output row-count overflow returns ErrRowCount.
 func (f Frame) FullJoin[K any](right Frame, key JoinKey[K]) (Frame, error) {
 	return joinFrames(f, right, key, fullJoin)
 }
@@ -144,7 +145,7 @@ func (f Frame) AntiJoin[K any](right Frame, key JoinKey[K]) (Frame, error) {
 }
 
 // CrossJoin returns the Cartesian product. Name collisions return
-// ErrColumnConflict.
+// ErrColumnConflict; output row-count overflow returns ErrRowCount.
 func (f Frame) CrossJoin(right Frame) (Frame, error) {
 	if err := validateColumnNames(f, right, -1, -1, ""); err != nil {
 		return Frame{}, err
@@ -153,13 +154,15 @@ func (f Frame) CrossJoin(right Frame) (Frame, error) {
 		return Frame{}, fmt.Errorf("%w: cross join row count overflows int", ErrRowCount)
 	}
 	total := f.Len() * right.Len()
-	leftRows := make([]int, 0, total)
-	rightRows := make([]int, 0, total)
-	for leftRow := 0; leftRow < f.Len(); leftRow++ {
-		for rightRow := 0; rightRow < right.Len(); rightRow++ {
-			leftRows = append(leftRows, leftRow)
-			rightRows = append(rightRows, rightRow)
-		}
+	if f.Width() == 0 && right.Width() == 0 {
+		return Frame{rowCount: total}, nil
+	}
+	var leftRows, rightRows []int
+	if f.Width() > 0 {
+		leftRows = crossJoinLeftRows(f.Len(), right.Len())
+	}
+	if right.Width() > 0 {
+		rightRows = crossJoinRightRows(f.Len(), right.Len())
 	}
 	columns := make([]column, 0, f.Width()+right.Width())
 	for _, column := range f.columns {
@@ -173,6 +176,30 @@ func (f Frame) CrossJoin(right Frame) (Frame, error) {
 		columns = append(columns, column)
 	}
 	return Frame{columns: columns, rowCount: total}, nil
+}
+
+func crossJoinLeftRows(leftLen, rightLen int) []int {
+	rows := make([]int, leftLen*rightLen)
+	offset := 0
+	for leftRow := range leftLen {
+		for i := range rightLen {
+			rows[offset+i] = leftRow
+		}
+		offset += rightLen
+	}
+	return rows
+}
+
+func crossJoinRightRows(leftLen, rightLen int) []int {
+	rows := make([]int, leftLen*rightLen)
+	offset := 0
+	for range leftLen {
+		for rightRow := range rightLen {
+			rows[offset] = rightRow
+			offset++
+		}
+	}
+	return rows
 }
 
 type joinKind uint8
@@ -204,7 +231,7 @@ type resolvedJoinPlan[K any] struct {
 
 type joinMatch struct {
 	first int
-	last  int
+	count int
 }
 
 type joinLookup[K any] interface {
@@ -233,18 +260,19 @@ func newJoinIndex[K any](right series.Series[K], lookup joinLookup[K]) joinIndex
 	for i := range index.next {
 		index.next[i] = -1
 	}
-	for row := 0; row < right.Len(); row++ {
+	for row := right.Len() - 1; row >= 0; row-- {
 		value, present := right.At(row)
 		if !present {
 			continue
 		}
 		matches, found := index.lookup.Get(value)
 		if !found {
-			index.lookup.Set(value, joinMatch{first: row, last: row})
+			index.lookup.Set(value, joinMatch{first: row, count: 1})
 			continue
 		}
-		index.next[matches.last] = row
-		matches.last = row
+		index.next[row] = matches.first
+		matches.first = row
+		matches.count++
 		index.lookup.Set(value, matches)
 	}
 	return index
@@ -262,25 +290,27 @@ func joinFrames[K any](left, right Frame, key JoinKey[K], kind joinKind) (Frame,
 		}
 	}
 
+	var leftRows, rightRows []int
 	switch kind {
 	case innerJoin, leftJoin:
 		lookup := plan.newLookup(plan.right.Len())
-		leftRows, rightRows := pairedMatchingRows(plan.left, plan.right, lookup, kind)
-		return buildJoinFrame(left, right, plan, leftRows, rightRows, kind), nil
+		leftRows, rightRows, err = pairedMatchingRows(plan.left, plan.right, lookup, kind, math.MaxInt)
 	case rightJoin:
 		lookup := plan.newLookup(plan.left.Len())
-		rightRows, leftRows := pairedMatchingRows(plan.right, plan.left, lookup, kind)
-		return buildJoinFrame(left, right, plan, leftRows, rightRows, kind), nil
+		rightRows, leftRows, err = pairedMatchingRows(plan.right, plan.left, lookup, kind, math.MaxInt)
 	case fullJoin:
 		lookup := plan.newLookup(plan.right.Len())
-		leftRows, rightRows := fullMatchingRows(plan.left, plan.right, lookup)
-		return buildJoinFrame(left, right, plan, leftRows, rightRows, kind), nil
+		leftRows, rightRows, err = fullMatchingRows(plan.left, plan.right, lookup, math.MaxInt)
 	case semiJoin, antiJoin:
 		lookup := plan.newLookup(plan.right.Len())
 		return left.Take(existenceRows(plan.left, plan.right, lookup, kind)), nil
 	default:
 		panic("dataframe: invalid join kind")
 	}
+	if err != nil {
+		return Frame{}, err
+	}
+	return buildJoinFrame(left, right, plan, leftRows, rightRows, kind), nil
 }
 
 func resolveJoinPlan[K any](left, right Frame, key JoinKey[K]) (resolvedJoinPlan[K], error) {
@@ -348,55 +378,68 @@ func validateColumnNames(left, right Frame, leftKeyIndex, rightKeyIndex int, out
 	return nil
 }
 
-func pairedMatchingRows[K any](probe, indexed series.Series[K], lookup joinLookup[K], kind joinKind) ([]int, []int) {
+func joinRowCountError() error {
+	return fmt.Errorf("%w: join result row count overflows int", ErrRowCount)
+}
+
+func pairedMatchingRows[K any](probe, indexed series.Series[K], lookup joinLookup[K], kind joinKind, limit int) ([]int, []int, error) {
 	if kind != innerJoin && kind != leftJoin && kind != rightJoin {
 		panic("dataframe: invalid paired join kind")
 	}
 	index := newJoinIndex(indexed, lookup)
-	probeRows := make([]int, 0, probe.Len())
-	indexedRows := make([]int, 0, probe.Len())
+	probeRows := make([]int, 0, min(probe.Len(), limit))
+	indexedRows := make([]int, 0, min(probe.Len(), limit))
 	for probeRow := 0; probeRow < probe.Len(); probeRow++ {
 		value, present := probe.At(probeRow)
-		if !present {
-			if kind != innerJoin {
-				probeRows = append(probeRows, probeRow)
-				indexedRows = append(indexedRows, -1)
+		matches, found := joinMatch{}, false
+		if present {
+			matches, found = index.lookup.Get(value)
+		}
+		if !found {
+			if kind == innerJoin {
+				continue
 			}
+			if len(probeRows) == limit {
+				return nil, nil, joinRowCountError()
+			}
+			probeRows = append(probeRows, probeRow)
+			indexedRows = append(indexedRows, -1)
 			continue
 		}
-		matches, found := index.lookup.Get(value)
-		if !found {
-			if kind != innerJoin {
-				probeRows = append(probeRows, probeRow)
-				indexedRows = append(indexedRows, -1)
-			}
-			continue
+		if matches.count > limit-len(probeRows) {
+			return nil, nil, joinRowCountError()
 		}
 		for indexedRow := matches.first; indexedRow >= 0; indexedRow = index.next[indexedRow] {
 			probeRows = append(probeRows, probeRow)
 			indexedRows = append(indexedRows, indexedRow)
 		}
 	}
-	return probeRows, indexedRows
+	return probeRows, indexedRows, nil
 }
 
-func fullMatchingRows[K any](left, right series.Series[K], lookup joinLookup[K]) ([]int, []int) {
+func fullMatchingRows[K any](left, right series.Series[K], lookup joinLookup[K], limit int) ([]int, []int, error) {
 	index := newJoinIndex(right, lookup)
-	leftRows := make([]int, 0, left.Len()+len(index.next))
-	rightRows := make([]int, 0, left.Len()+len(index.next))
+	capacity := min(left.Len(), limit)
+	capacity += min(len(index.next), limit-capacity)
+	leftRows := make([]int, 0, capacity)
+	rightRows := make([]int, 0, capacity)
 	matchedRight := make([]bool, len(index.next))
 	for leftRow := 0; leftRow < left.Len(); leftRow++ {
 		value, present := left.At(leftRow)
-		if !present {
+		matches, found := joinMatch{}, false
+		if present {
+			matches, found = index.lookup.Get(value)
+		}
+		if !found {
+			if len(leftRows) == limit {
+				return nil, nil, joinRowCountError()
+			}
 			leftRows = append(leftRows, leftRow)
 			rightRows = append(rightRows, -1)
 			continue
 		}
-		matches, found := index.lookup.Get(value)
-		if !found {
-			leftRows = append(leftRows, leftRow)
-			rightRows = append(rightRows, -1)
-			continue
+		if matches.count > limit-len(leftRows) {
+			return nil, nil, joinRowCountError()
 		}
 		for rightRow := matches.first; rightRow >= 0; rightRow = index.next[rightRow] {
 			leftRows = append(leftRows, leftRow)
@@ -406,11 +449,14 @@ func fullMatchingRows[K any](left, right series.Series[K], lookup joinLookup[K])
 	}
 	for rightRow, matched := range matchedRight {
 		if !matched {
+			if len(leftRows) == limit {
+				return nil, nil, joinRowCountError()
+			}
 			leftRows = append(leftRows, -1)
 			rightRows = append(rightRows, rightRow)
 		}
 	}
-	return leftRows, rightRows
+	return leftRows, rightRows, nil
 }
 
 func existenceRows[K any](left, right series.Series[K], lookup joinLookup[K], kind joinKind) []int {
@@ -443,14 +489,29 @@ func existenceRows[K any](left, right series.Series[K], lookup joinLookup[K], ki
 func buildJoinFrame[K any](left, right Frame, plan resolvedJoinPlan[K], leftRows, rightRows []int, kind joinKind) Frame {
 	var nullableLeftRows series.Series[int]
 	var nullableRightRows series.Series[int]
+	leftColumns := left.Width()
+	rightColumns := right.Width()
+	coalescedKey := plan.projection.leftKeyIndex >= 0
+	if coalescedKey {
+		leftColumns--
+		rightColumns--
+	}
 	switch kind {
 	case leftJoin:
-		nullableRightRows = joinRowIndexes(rightRows)
+		if rightColumns > 0 {
+			nullableRightRows = joinRowIndexes(rightRows)
+		}
 	case rightJoin:
-		nullableLeftRows = joinRowIndexes(leftRows)
+		if leftColumns > 0 {
+			nullableLeftRows = joinRowIndexes(leftRows)
+		}
 	case fullJoin:
-		nullableLeftRows = joinRowIndexes(leftRows)
-		nullableRightRows = joinRowIndexes(rightRows)
+		if leftColumns > 0 || coalescedKey {
+			nullableLeftRows = joinRowIndexes(leftRows)
+		}
+		if rightColumns > 0 || coalescedKey {
+			nullableRightRows = joinRowIndexes(rightRows)
+		}
 	}
 
 	columns := make([]column, 0, left.Width()+right.Width())

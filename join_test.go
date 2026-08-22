@@ -374,12 +374,71 @@ func TestCrossJoin(t *testing.T) {
 	if _, err := left.CrossJoin(conflicting); !errors.Is(err, ErrColumnConflict) {
 		t.Fatalf("conflict error = %v", err)
 	}
+
+	zeroLeft := Frame{rowCount: left.Len()}
+	zeroRight := Frame{rowCount: right.Len()}
+	for _, test := range []struct {
+		name        string
+		left, right Frame
+		width       int
+	}{
+		{name: "both", left: zeroLeft, right: zeroRight},
+		{name: "left", left: left, right: zeroRight, width: 1},
+		{name: "right", left: zeroLeft, right: right, width: 1},
+	} {
+		joined, err := test.left.CrossJoin(test.right)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if joined.Len() != 6 || joined.Width() != test.width {
+			t.Fatalf("%s zero-width CrossJoin shape = %dx%d", test.name, joined.Len(), joined.Width())
+		}
+	}
+}
+
+func TestZeroWidthOuterJoins(t *testing.T) {
+	leftKeys := series.New([]int{1, 2})
+	rightKeys := series.New([]int{3, 4})
+	zero := Frame{rowCount: 2}
+	full, err := zero.FullJoin(zero, On(leftKeys, rightKeys))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if full.Len() != 4 || full.Width() != 0 {
+		t.Fatalf("zero-width FullJoin shape = %dx%d", full.Len(), full.Width())
+	}
 }
 
 func TestCrossJoinRowCountOverflowReturnsError(t *testing.T) {
 	_, err := (Frame{rowCount: math.MaxInt}).CrossJoin(Frame{rowCount: 2})
 	if !errors.Is(err, ErrRowCount) {
 		t.Fatalf("CrossJoin() overflow error = %v, want ErrRowCount", err)
+	}
+}
+
+func TestMatchingRowsReturnRowCountError(t *testing.T) {
+	const limit = 3
+	keys := series.New([]int{1, 1})
+	tests := []struct {
+		name string
+		kind joinKind
+	}{
+		{name: "Inner", kind: innerJoin},
+		{name: "Left", kind: leftJoin},
+		{name: "Right", kind: rightJoin},
+		{name: "Full", kind: fullJoin},
+	}
+	for _, test := range tests {
+		lookup := make(comparableJoinLookup[int], keys.Len())
+		var err error
+		if test.kind == fullJoin {
+			_, _, err = fullMatchingRows(keys, keys, lookup, limit)
+		} else {
+			_, _, err = pairedMatchingRows(keys, keys, lookup, test.kind, limit)
+		}
+		if !errors.Is(err, ErrRowCount) {
+			t.Fatalf("%s matching error = %v, want ErrRowCount", test.name, err)
+		}
 	}
 }
 

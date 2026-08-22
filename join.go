@@ -18,7 +18,7 @@ import (
 type JoinKey[K any] struct {
 	left        series.Series[K]
 	right       series.Series[K]
-	hasher      maphash.Hasher[K]
+	newLookup   func(int) joinLookup[K]
 	leftName    string
 	rightName   string
 	outputName  string
@@ -28,13 +28,25 @@ type JoinKey[K any] struct {
 // On joins positional comparable keys using ==. It retains every original
 // column from both frames; name collisions return ErrColumnConflict.
 func On[K comparable](left, right series.Series[K]) JoinKey[K] {
-	return JoinKey[K]{left: left, right: right, hasher: maphash.ComparableHasher[K]{}}
+	return JoinKey[K]{
+		left:  left,
+		right: right,
+		newLookup: func(capacity int) joinLookup[K] {
+			return make(comparableJoinLookup[K], capacity)
+		},
+	}
 }
 
 // OnBy is On with a custom hash and equivalence relation. It supports
 // non-comparable keys.
 func OnBy[K any](left, right series.Series[K], hasher maphash.Hasher[K]) JoinKey[K] {
-	return JoinKey[K]{left: left, right: right, hasher: hasher}
+	var newLookup func(int) joinLookup[K]
+	if hasher != nil {
+		newLookup = func(int) joinLookup[K] {
+			return hashmap.New[K, joinMatch](hasher)
+		}
+	}
+	return JoinKey[K]{left: left, right: right, newLookup: newLookup}
 }
 
 // Using joins same-named stored columns using == and emits one coalesced column
@@ -53,14 +65,28 @@ func UsingBy[K any](name string, hasher maphash.Hasher[K]) JoinKey[K] {
 // UsingColumns joins differently named stored columns using == and emits one
 // coalesced key under outputName. K must be supplied explicitly.
 func UsingColumns[K comparable](outputName, leftName, rightName string) JoinKey[K] {
-	return UsingColumnsBy(outputName, leftName, rightName, maphash.ComparableHasher[K]{})
+	return JoinKey[K]{
+		newLookup: func(capacity int) joinLookup[K] {
+			return make(comparableJoinLookup[K], capacity)
+		},
+		leftName:    leftName,
+		rightName:   rightName,
+		outputName:  outputName,
+		usingStored: true,
+	}
 }
 
 // UsingColumnsBy is UsingColumns with a custom hash and equivalence relation.
 // It supports non-comparable stored key columns. K must be supplied explicitly.
 func UsingColumnsBy[K any](outputName, leftName, rightName string, hasher maphash.Hasher[K]) JoinKey[K] {
+	var newLookup func(int) joinLookup[K]
+	if hasher != nil {
+		newLookup = func(int) joinLookup[K] {
+			return hashmap.New[K, joinMatch](hasher)
+		}
+	}
 	return JoinKey[K]{
-		hasher:      hasher,
+		newLookup:   newLookup,
 		leftName:    leftName,
 		rightName:   rightName,
 		outputName:  outputName,
@@ -82,7 +108,8 @@ func (f Frame) InnerJoin[K any](right Frame, key JoinKey[K]) (Frame, error) {
 	if err := validateJoinSchema(f, right, resolved, leftKeyIndex, rightKeyIndex); err != nil {
 		return Frame{}, err
 	}
-	leftRows, rightRows := matchingRows(resolved.left, resolved.right, resolved.hasher, false)
+	lookup := resolved.newLookup(resolved.right.Len())
+	leftRows, rightRows := matchingRows(resolved.left, resolved.right, lookup, false)
 	return buildJoinFrame(f, right, resolved, leftKeyIndex, rightKeyIndex, leftRows, rightRows, innerJoin), nil
 }
 
@@ -98,7 +125,8 @@ func (f Frame) LeftJoin[K any](right Frame, key JoinKey[K]) (Frame, error) {
 	if err := validateJoinSchema(f, right, resolved, leftKeyIndex, rightKeyIndex); err != nil {
 		return Frame{}, err
 	}
-	leftRows, rightRows := matchingRows(resolved.left, resolved.right, resolved.hasher, true)
+	lookup := resolved.newLookup(resolved.right.Len())
+	leftRows, rightRows := matchingRows(resolved.left, resolved.right, lookup, true)
 	return buildJoinFrame(f, right, resolved, leftKeyIndex, rightKeyIndex, leftRows, rightRows, leftJoin), nil
 }
 
@@ -115,7 +143,8 @@ func (f Frame) RightJoin[K any](right Frame, key JoinKey[K]) (Frame, error) {
 	if err := validateJoinSchema(f, right, resolved, leftKeyIndex, rightKeyIndex); err != nil {
 		return Frame{}, err
 	}
-	rightRows, leftRows := matchingRows(resolved.right, resolved.left, resolved.hasher, true)
+	lookup := resolved.newLookup(resolved.left.Len())
+	rightRows, leftRows := matchingRows(resolved.right, resolved.left, lookup, true)
 	return buildJoinFrame(f, right, resolved, leftKeyIndex, rightKeyIndex, leftRows, rightRows, rightJoin), nil
 }
 
@@ -132,7 +161,8 @@ func (f Frame) FullJoin[K any](right Frame, key JoinKey[K]) (Frame, error) {
 	if err := validateJoinSchema(f, right, resolved, leftKeyIndex, rightKeyIndex); err != nil {
 		return Frame{}, err
 	}
-	leftRows, rightRows := fullMatchingRows(resolved.left, resolved.right, resolved.hasher)
+	lookup := resolved.newLookup(resolved.right.Len())
+	leftRows, rightRows := fullMatchingRows(resolved.left, resolved.right, lookup)
 	return buildJoinFrame(f, right, resolved, leftKeyIndex, rightKeyIndex, leftRows, rightRows, fullJoin), nil
 }
 
@@ -143,7 +173,8 @@ func (f Frame) SemiJoin[K any](right Frame, key JoinKey[K]) (Frame, error) {
 	if err != nil {
 		return Frame{}, err
 	}
-	rows := matchedLeftRows(resolved.left, resolved.right, resolved.hasher, true)
+	lookup := resolved.newLookup(resolved.right.Len())
+	rows := matchedLeftRows(resolved.left, resolved.right, lookup, true)
 	return f.Take(rows), nil
 }
 
@@ -154,7 +185,8 @@ func (f Frame) AntiJoin[K any](right Frame, key JoinKey[K]) (Frame, error) {
 	if err != nil {
 		return Frame{}, err
 	}
-	rows := matchedLeftRows(resolved.left, resolved.right, resolved.hasher, false)
+	lookup := resolved.newLookup(resolved.right.Len())
+	rows := matchedLeftRows(resolved.left, resolved.right, lookup, false)
 	return f.Take(rows), nil
 }
 
@@ -201,13 +233,51 @@ type joinMatch struct {
 	last  int
 }
 
+type joinLookup[K any] interface {
+	Get(K) (joinMatch, bool)
+	Set(K, joinMatch)
+}
+
+type comparableJoinLookup[K comparable] map[K]joinMatch
+
+func (m comparableJoinLookup[K]) Get(key K) (joinMatch, bool) {
+	match, found := m[key]
+	return match, found
+}
+
+func (m comparableJoinLookup[K]) Set(key K, match joinMatch) {
+	m[key] = match
+}
+
 type joinIndex[K any] struct {
-	lookup *hashmap.Map[K, joinMatch]
+	lookup joinLookup[K]
 	next   []int
 }
 
+func newJoinIndex[K any](right series.Series[K], lookup joinLookup[K]) joinIndex[K] {
+	index := joinIndex[K]{lookup: lookup, next: make([]int, right.Len())}
+	for i := range index.next {
+		index.next[i] = -1
+	}
+	for row := 0; row < right.Len(); row++ {
+		value, present := right.At(row)
+		if !present {
+			continue
+		}
+		matches, found := index.lookup.Get(value)
+		if !found {
+			index.lookup.Set(value, joinMatch{first: row, last: row})
+			continue
+		}
+		index.next[matches.last] = row
+		matches.last = row
+		index.lookup.Set(value, matches)
+	}
+	return index
+}
+
 func resolveJoinKey[K any](left, right Frame, key JoinKey[K]) (JoinKey[K], int, int, error) {
-	if key.hasher == nil {
+	if key.newLookup == nil {
 		return key, -1, -1, fmt.Errorf("%w: join key has a nil hasher", ErrUnsupported)
 	}
 	if !key.usingStored {
@@ -264,9 +334,8 @@ func validateColumnNames(left, right Frame, leftKeyIndex, rightKeyIndex int, out
 	return nil
 }
 
-func matchingRows[K any](left, right series.Series[K], hasher maphash.Hasher[K], includeUnmatched bool) ([]int, []int) {
-	index := newJoinIndex(right, hasher)
-
+func matchingRows[K any](left, right series.Series[K], lookup joinLookup[K], includeUnmatched bool) ([]int, []int) {
+	index := newJoinIndex(right, lookup)
 	leftRows := make([]int, 0, left.Len())
 	rightRows := make([]int, 0, left.Len())
 	for leftRow := 0; leftRow < left.Len(); leftRow++ {
@@ -294,12 +363,11 @@ func matchingRows[K any](left, right series.Series[K], hasher maphash.Hasher[K],
 	return leftRows, rightRows
 }
 
-func fullMatchingRows[K any](left, right series.Series[K], hasher maphash.Hasher[K]) ([]int, []int) {
-	index := newJoinIndex(right, hasher)
-
-	leftRows := make([]int, 0, left.Len()+right.Len())
-	rightRows := make([]int, 0, left.Len()+right.Len())
-	matchedRight := make([]bool, right.Len())
+func fullMatchingRows[K any](left, right series.Series[K], lookup joinLookup[K]) ([]int, []int) {
+	index := newJoinIndex(right, lookup)
+	leftRows := make([]int, 0, left.Len()+len(index.next))
+	rightRows := make([]int, 0, left.Len()+len(index.next))
+	matchedRight := make([]bool, len(index.next))
 	for leftRow := 0; leftRow < left.Len(); leftRow++ {
 		value, present := left.At(leftRow)
 		if !present {
@@ -328,8 +396,8 @@ func fullMatchingRows[K any](left, right series.Series[K], hasher maphash.Hasher
 	return leftRows, rightRows
 }
 
-func matchedLeftRows[K any](left, right series.Series[K], hasher maphash.Hasher[K], wantMatch bool) []int {
-	index := newJoinIndex(right, hasher)
+func matchedLeftRows[K any](left, right series.Series[K], lookup joinLookup[K], wantMatch bool) []int {
+	index := newJoinIndex(right, lookup)
 	rows := make([]int, 0, left.Len())
 	for row := 0; row < left.Len(); row++ {
 		value, present := left.At(row)
@@ -384,31 +452,6 @@ func buildJoinFrame[K any](left, right Frame, key JoinKey[K], leftKeyIndex, righ
 		}
 	}
 	return Frame{columns: columns, rowCount: len(leftRows)}
-}
-
-func newJoinIndex[K any](right series.Series[K], hasher maphash.Hasher[K]) joinIndex[K] {
-	index := joinIndex[K]{
-		lookup: hashmap.New[K, joinMatch](hasher),
-		next:   make([]int, right.Len()),
-	}
-	for i := range index.next {
-		index.next[i] = -1
-	}
-	for row := 0; row < right.Len(); row++ {
-		value, present := right.At(row)
-		if !present {
-			continue
-		}
-		matches, found := index.lookup.Get(value)
-		if !found {
-			index.lookup.Set(value, joinMatch{first: row, last: row})
-			continue
-		}
-		index.next[matches.last] = row
-		matches.last = row
-		index.lookup.Set(value, matches)
-	}
-	return index
 }
 
 func joinedKey[K any](key JoinKey[K], leftRows, rightRows []int, nullableLeftRows, nullableRightRows series.Series[int], kind joinKind) series.Series[K] {

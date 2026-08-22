@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/joeychilson/dataframe"
 	"github.com/joeychilson/dataframe/series"
@@ -327,6 +328,28 @@ func TestReadWriteConvenienceAndConfiguration(t *testing.T) {
 	}
 }
 
+func TestWriterRejectsInvalidUnicodeDelimiter(t *testing.T) {
+	frame, err := dataframe.New(dataframe.Column("value", []int{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, delimiter := range []rune{-1, 0xD800, utf8.MaxRune + 1} {
+		writer := NewWriter(&strings.Builder{})
+		writer.Header = false
+		writer.Comma = delimiter
+		if err := writer.Write(frame); err == nil {
+			t.Errorf("Write() accepted delimiter %U", delimiter)
+		}
+
+		recordWriter := NewWriter(&strings.Builder{})
+		recordWriter.Header = false
+		recordWriter.Comma = delimiter
+		if err := recordWriter.WriteRecords([]struct{ Value int }{}); err == nil {
+			t.Errorf("WriteRecords() accepted delimiter %U", delimiter)
+		}
+	}
+}
+
 func BenchmarkRead(b *testing.B) {
 	var input strings.Builder
 	input.WriteString("id,value\n")
@@ -390,12 +413,12 @@ func (c *textCode) UnmarshalText(text []byte) error {
 }
 
 func (c textCode) MarshalText() ([]byte, error) {
-	return []byte(fmt.Sprintf("C%d", c)), nil
+	return fmt.Appendf(nil, "C%d", c), nil
 }
 
 type incrementingTextCode int
 
 func (c *incrementingTextCode) MarshalText() ([]byte, error) {
 	*c = *c + 1
-	return []byte(fmt.Sprintf("C%d", *c)), nil
+	return fmt.Appendf(nil, "C%d", *c), nil
 }

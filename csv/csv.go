@@ -553,5 +553,5 @@ func marshalReflectValue(value reflect.Value) (string, error) {
 }
 
 func validDelimiter(delimiter rune) bool {
-	return delimiter != 0 && delimiter != '"' && delimiter != '\r' && delimiter != '\n' && delimiter != utf8.RuneError
+	return utf8.ValidRune(delimiter) && delimiter != 0 && delimiter != '"' && delimiter != '\r' && delimiter != '\n' && delimiter != utf8.RuneError
 }

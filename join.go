@@ -3,6 +3,7 @@ package dataframe
 import (
 	"fmt"
 	"hash/maphash"
+	"math"
 
 	"github.com/joeychilson/dataframe/internal/hashmap"
 	"github.com/joeychilson/dataframe/series"
@@ -148,8 +149,7 @@ func (f Frame) CrossJoin(right Frame) (Frame, error) {
 	if err := validateColumnNames(f, right, -1, -1, ""); err != nil {
 		return Frame{}, err
 	}
-	maxInt := int(^uint(0) >> 1)
-	if right.Len() != 0 && f.Len() > maxInt/right.Len() {
+	if right.Len() != 0 && f.Len() > math.MaxInt/right.Len() {
 		return Frame{}, fmt.Errorf("%w: cross join row count overflows int", ErrRowCount)
 	}
 	total := f.Len() * right.Len()

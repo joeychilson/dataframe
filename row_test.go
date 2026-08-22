@@ -115,12 +115,21 @@ func TestRecordRoundTripPreservesPresentNil(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	frame, err = frame.Concat(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
 	records, err := frame.Records[record]()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(records) != 1 || records[0].Value != nil || !records[0].Optional.Valid || records[0].Optional.Value != nil {
+	if len(records) != 2 {
 		t.Fatalf("round trip = %#v", records)
+	}
+	for _, record := range records {
+		if record.Value != nil || !record.Optional.Valid || record.Optional.Value != nil {
+			t.Fatalf("round trip = %#v", records)
+		}
 	}
 }
 
@@ -290,24 +299,32 @@ func TestRecordBackedFrameOperations(t *testing.T) {
 func TestConcatTypedAndReflectedColumns(t *testing.T) {
 	type identifier int
 	type record struct {
-		Value identifier
+		Value *identifier
 	}
-	reflected, err := FromRecords([]record{{Value: 1}})
+	one, two := identifier(1), identifier(2)
+	reflected, err := FromRecords([]record{{Value: &one}, {}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	typed, err := New(Column("Value", []identifier{2}))
+	reflectedOther, err := FromRecords([]record{{}, {Value: &two}})
 	if err != nil {
 		t.Fatal(err)
 	}
+	first, second, none := series.Some(one), series.Some(two), series.None[identifier]()
+	typed, err := New(ColumnFromSeries("Value", series.FromOptionals([]series.Optional[identifier]{none, second})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	forward := []series.Optional[identifier]{first, none, none, second}
 	tests := []struct {
 		left, right Frame
-		want        []identifier
+		want        []series.Optional[identifier]
 	}{
-		{left: reflected, right: typed, want: []identifier{1, 2}},
-		{left: typed, right: reflected, want: []identifier{2, 1}},
+		{left: reflected, right: typed, want: forward},
+		{left: typed, right: reflected, want: []series.Optional[identifier]{none, second, first, none}},
+		{left: reflected, right: reflectedOther, want: forward},
 	}
-	for _, test := range tests {
+	for i, test := range tests {
 		joined, err := test.left.Concat(test.right)
 		if err != nil {
 			t.Fatal(err)
@@ -316,8 +333,8 @@ func TestConcatTypedAndReflectedColumns(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := values.Values(); !slices.Equal(got, test.want) {
-			t.Fatalf("Concat values = %v, want %v", got, test.want)
+		if got := values.Optionals(); !slices.Equal(got, test.want) {
+			t.Fatalf("Concat %d values = %v, want %v", i, got, test.want)
 		}
 	}
 }

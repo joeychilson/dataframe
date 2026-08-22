@@ -1,7 +1,6 @@
 package dataframe
 
 import (
-	"fmt"
 	"iter"
 	"reflect"
 
@@ -184,56 +183,56 @@ func (c reflectData) filter(selection mask.Mask) columnData {
 	return reflectData{values: values, validity: validity}
 }
 
-func (c reflectData) concat(base column, others []column) (columnData, error) {
-	maxInt := int(^uint(0) >> 1)
-	total := base.length
-	nullable := base.nullable
-	for _, other := range others {
-		if other.typeOf != base.typeOf {
-			return nil, fmt.Errorf("%w: column %q type %v does not match %v", ErrSchemaMismatch, base.name, other.typeOf, base.typeOf)
-		}
-		if other.length > maxInt-total {
-			return nil, fmt.Errorf("%w: concatenated column %q length overflows int", ErrRowCount, base.name)
-		}
-		total += other.length
-		nullable = nullable || other.nullable
-	}
+func (c reflectData) length() int {
+	return c.values.Len()
+}
 
+func (c reflectData) concat(others []columnData, total int, nullable bool) columnData {
 	values := reflect.MakeSlice(c.values.Type(), total, total)
 	var validity bitmap.Bitmap
 	if nullable {
 		validity = bitmap.Filled(total)
 	}
-	all := make([]column, 0, len(others)+1)
-	all = append(all, base)
-	all = append(all, others...)
-	offset := 0
-	for _, column := range all {
-		for row := range column.length {
-			value, present := column.values.at(row)
-			if present && value != nil {
-				values.Index(offset + row).Set(reflect.ValueOf(value))
+	reflect.Copy(values, c.values)
+	if c.validity.Initialized() {
+		validity.Copy(0, c.validity)
+	}
+	offset := c.values.Len()
+	for _, other := range others {
+		length := other.length()
+		if reflected, ok := other.(reflectData); ok {
+			reflect.Copy(values.Slice(offset, offset+length), reflected.values)
+			if reflected.validity.Initialized() {
+				validity.Copy(offset, reflected.validity)
 			}
-			if validity.Initialized() && !present {
-				validity.Set(offset+row, false)
+		} else {
+			for row := range length {
+				value, present := other.at(row)
+				if present && value != nil {
+					values.Index(offset + row).Set(reflect.ValueOf(value))
+				}
+				if nullable && !present {
+					validity.Set(offset+row, false)
+				}
 			}
 		}
-		offset += column.length
+		offset += length
 	}
-	return reflectData{values: values, validity: validity}, nil
+	return reflectData{values: values, validity: validity}
 }
 
-func typedSeriesFromColumn[T any](column column) series.Series[T] {
-	if typed, ok := column.values.(typedData[T]); ok {
+func typedSeriesFromData[T any](data columnData) series.Series[T] {
+	if typed, ok := data.(typedData[T]); ok {
 		return typed.values
 	}
-	values := make([]T, column.length)
+	reflected := data.(reflectData)
+	values := make([]T, reflected.values.Len())
 	var validity []bool
-	if column.nullable {
+	if reflected.validity.Initialized() {
 		validity = make([]bool, len(values))
 	}
 	for i := range values {
-		value, present := column.values.at(i)
+		value, present := reflected.at(i)
 		if present {
 			if value != nil {
 				values[i] = value.(T)

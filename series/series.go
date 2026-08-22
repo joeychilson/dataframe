@@ -3,6 +3,7 @@ package series
 import (
 	"fmt"
 	"iter"
+	"math"
 	"slices"
 
 	"github.com/joeychilson/dataframe/internal/bitmap"
@@ -24,7 +25,7 @@ type Series[T any] struct {
 
 // New returns a non-null Series containing a copy of values.
 func New[T any](values []T) Series[T] {
-	return Series[T]{values: slices.Clip(slices.Clone(values))}
+	return Series[T]{values: slices.Clone(values)}
 }
 
 // NewNullable returns a nullable Series for which valid[i] reports whether
@@ -37,7 +38,7 @@ func NewNullable[T any](values []T, valid []bool) (Series[T], error) {
 	}
 
 	return Series[T]{
-		values:   slices.Clip(slices.Clone(values)),
+		values:   slices.Clone(values),
 		validity: bitmap.FromBools(valid),
 	}, nil
 }
@@ -220,11 +221,10 @@ func (s Series[T]) Concat(others ...Series[T]) Series[T] {
 		return s
 	}
 
-	maxInt := int(^uint(0) >> 1)
 	total := s.Len()
 	nullable := s.validity.Initialized()
 	for _, other := range others {
-		if other.Len() > maxInt-total {
+		if other.Len() > math.MaxInt-total {
 			panic("series: Concat: length out of range")
 		}
 		total += other.Len()
@@ -643,7 +643,7 @@ func (s Series[T]) FillNull(value T) Series[T] {
 		return Repeat(value, s.Len())
 	}
 
-	values := slices.Clip(slices.Clone(s.values))
+	values := slices.Clone(s.values)
 	for i := range s.validity.UnsetRows() {
 		values[i] = value
 	}

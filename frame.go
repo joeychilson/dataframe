@@ -3,6 +3,7 @@ package dataframe
 import (
 	"fmt"
 	"hash/maphash"
+	"math"
 	"reflect"
 	"slices"
 	"strings"
@@ -158,7 +159,7 @@ func (f Frame) Column[T any](name string) (series.Series[T], error) {
 	if column.typeOf != want {
 		return series.Series[T]{}, fmt.Errorf("%w: column %q has type %v, want %v", ErrColumnType, name, column.typeOf, want)
 	}
-	return typedSeriesFromColumn[T](column), nil
+	return typedSeriesFromData[T](column.values), nil
 }
 
 // With adds values under name or replaces the existing column in place.
@@ -467,12 +468,11 @@ func (f Frame) DistinctByUsing[K any](key series.Series[K], hasher maphash.Hashe
 // names, order, and exact Go types. Output nullability is widened when needed.
 // Zero-width frames concatenate by adding their retained row counts.
 //
-// Errors: ErrSchemaMismatch.
+// Errors: ErrSchemaMismatch, ErrRowCount.
 func (f Frame) Concat(others ...Frame) (Frame, error) {
 	if len(others) == 0 {
 		return f, nil
 	}
-	maxInt := int(^uint(0) >> 1)
 	total := f.Len()
 	for frameIndex, other := range others {
 		if other.Width() != f.Width() {
@@ -484,27 +484,25 @@ func (f Frame) Concat(others ...Frame) (Frame, error) {
 				return Frame{}, fmt.Errorf("%w: frame %d column %d is %q:%v, want %q:%v", ErrSchemaMismatch, frameIndex+1, columnIndex, otherColumn.name, otherColumn.typeOf, column.name, column.typeOf)
 			}
 		}
-		if other.Len() > maxInt-total {
+		if other.Len() > math.MaxInt-total {
 			return Frame{}, fmt.Errorf("%w: concatenated row count overflows int", ErrRowCount)
 		}
 		total += other.Len()
 	}
+	if f.Width() == 0 {
+		return Frame{rowCount: total}, nil
+	}
 
 	columns := make([]column, f.Width())
+	parts := make([]columnData, len(others))
 	for columnIndex, base := range f.columns {
-		parts := make([]column, len(others))
 		for i, other := range others {
-			parts[i] = other.columns[columnIndex]
-		}
-		values, err := base.values.concat(base, parts)
-		if err != nil {
-			return Frame{}, err
-		}
-		base.length = total
-		for _, part := range parts {
+			part := other.columns[columnIndex]
+			parts[i] = part.values
 			base.nullable = base.nullable || part.nullable
 		}
-		base.values = values
+		base.length = total
+		base.values = base.values.concat(parts, total, base.nullable)
 		columns[columnIndex] = base
 	}
 	return Frame{columns: columns, rowCount: total}, nil
@@ -524,7 +522,8 @@ type columnData interface {
 	takeNullable(series.Series[int]) columnData
 	slice(int, int) columnData
 	filter(mask.Mask) columnData
-	concat(column, []column) (columnData, error)
+	length() int
+	concat([]columnData, int, bool) columnData
 }
 
 type columnSpec[T any] struct {
@@ -587,16 +586,17 @@ func (c typedData[T]) filter(selection mask.Mask) columnData {
 	return c
 }
 
-func (c typedData[T]) concat(base column, others []column) (columnData, error) {
+func (c typedData[T]) length() int {
+	return c.values.Len()
+}
+
+func (c typedData[T]) concat(others []columnData, _ int, _ bool) columnData {
 	parts := make([]series.Series[T], len(others))
 	for i, other := range others {
-		if other.typeOf != base.typeOf {
-			return nil, fmt.Errorf("%w: column %q type %v does not match %v", ErrSchemaMismatch, base.name, other.typeOf, base.typeOf)
-		}
-		parts[i] = typedSeriesFromColumn[T](other)
+		parts[i] = typedSeriesFromData[T](other)
 	}
 	c.values = c.values.Concat(parts...)
-	return c, nil
+	return c
 }
 
 type distinctColumn interface {

@@ -551,8 +551,7 @@ func assertPanics(t *testing.T, fn func()) {
 }
 
 func TestConcatRowCountOverflowReturnsError(t *testing.T) {
-	maxInt := int(^uint(0) >> 1)
-	_, err := (Frame{rowCount: maxInt}).Concat(Frame{rowCount: 1})
+	_, err := (Frame{rowCount: math.MaxInt}).Concat(Frame{rowCount: 1})
 	if !errors.Is(err, ErrRowCount) {
 		t.Fatalf("Concat() overflow error = %v, want ErrRowCount", err)
 	}

@@ -1,503 +1,695 @@
-// Package series provides immutable, homogeneous typed columns.
 package series
 
 import (
-	"cmp"
-	"errors"
 	"fmt"
 	"iter"
-	"reflect"
 	"slices"
+
+	"github.com/joeychilson/dataframe/internal/reduce"
+	"github.com/joeychilson/dataframe/mask"
 )
 
-var (
-	// ErrValidityRequired is returned when NewNullable is called without a
-	// validity vector.
-	ErrValidityRequired = errors.New("validity must not be nil")
-
-	// ErrInvalidValidity is returned when a validity slice and its values have
-	// different lengths.
-	ErrInvalidValidity = errors.New("validity length must match values length")
-)
-
-// Number permits the built-in integer and floating-point types, including
-// user-defined types with one of those underlying types.
-type Number interface {
-	~int | ~int8 | ~int16 | ~int32 | ~int64 |
-		~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 | ~uintptr |
-		~float32 | ~float64
-}
-
-// Series is an immutable, homogeneous column. A nil validity slice means that
-// every value is valid; otherwise validity[i] reports whether values[i] is
-// present.
+// Series is an immutable, homogeneous sequence of values of type T. Each row
+// is either present or null. Its zero value is an empty Series.
 //
-// Series values are safe to share between Frames. Constructors and accessors
-// copy caller-owned slices so a Series cannot be mutated through an alias.
+// Immutability is shallow. Constructors and accessors copy their outer slices,
+// and Series operations never mutate element values. Elements containing
+// slices, maps, pointers, or other references remain shared with callers, who
+// are responsible for synchronizing any mutation of those values.
 type Series[T any] struct {
 	values   []T
 	validity []bool
 }
 
-// New constructs a non-nullable Series and copies values.
+// New returns a non-null Series containing a copy of values.
 func New[T any](values []T) Series[T] {
 	return Series[T]{values: slices.Clip(slices.Clone(values))}
 }
 
-// NewNullable constructs a nullable Series and copies values and validity.
-func NewNullable[T any](values []T, validity []bool) (Series[T], error) {
-	if validity == nil {
-		return Series[T]{}, ErrValidityRequired
+// NewNullable returns a nullable Series for which valid[i] reports whether
+// values[i] is present. The result remains nullable when valid is empty or
+// contains only true values. Both outer slices are copied. NewNullable returns
+// an error wrapping ErrLengthMismatch when their lengths differ.
+func NewNullable[T any](values []T, valid []bool) (Series[T], error) {
+	if len(values) != len(valid) {
+		return Series[T]{}, fmt.Errorf("%w: got %d validity entries for %d values", ErrLengthMismatch, len(valid), len(values))
 	}
-	if len(validity) != len(values) {
-		return Series[T]{}, fmt.Errorf("%w: got %d validity bits for %d values", ErrInvalidValidity, len(validity), len(values))
-	}
+
+	// Allocate even at length zero so the nullable schema does not collapse
+	// into the nil validity representation used by non-null Series.
+	validity := make([]bool, len(valid))
+	copy(validity, valid)
 
 	return Series[T]{
 		values:   slices.Clip(slices.Clone(values)),
-		validity: slices.Clip(slices.Clone(validity)),
+		validity: validity,
 	}, nil
 }
 
-// Len returns the number of rows in the Series.
+// FromOptionals returns a nullable Series containing the supplied optional
+// cells. The result remains nullable when values is empty or contains no nulls.
+func FromOptionals[T any](values []Optional[T]) Series[T] {
+	physical := make([]T, len(values))
+	validity := make([]bool, len(values))
+	for i, value := range values {
+		if value.Valid {
+			physical[i] = value.Value
+			validity[i] = true
+		}
+	}
+	return Series[T]{values: physical, validity: validity}
+}
+
+// Repeat returns a non-null Series containing n copies of value. It panics
+// when n is negative, matching other size-taking constructors in this API.
+func Repeat[T any](value T, n int) Series[T] {
+	return Series[T]{values: slices.Repeat([]T{value}, n)}
+}
+
+// Len returns the number of rows, including null rows.
 func (s Series[T]) Len() int {
 	return len(s.values)
 }
 
-// Type returns the exact Go type stored by the Series.
-func (s Series[T]) Type() reflect.Type {
-	return reflect.TypeFor[T]()
-}
-
-// Nullable reports whether the Series carries an explicit validity vector and
-// can therefore represent null values. Use NullCount to determine whether it
-// currently contains any nulls.
+// Nullable reports whether the Series schema permits null rows. It reports
+// true for a Series constructed by NewNullable or FromOptionals even when the
+// Series is empty or every row is present. Use NullCount to determine whether
+// the Series currently contains any null rows.
 func (s Series[T]) Nullable() bool {
 	return s.validity != nil
 }
 
-// Count returns the number of present values in the Series.
-func (s Series[T]) Count() int {
-	return len(s.values) - s.NullCount()
-}
-
-// NullCount returns the number of null values in the Series.
+// NullCount returns the number of null rows.
 func (s Series[T]) NullCount() int {
-	if s.validity == nil {
-		return 0
-	}
-
-	n := 0
+	count := 0
 	for _, valid := range s.validity {
 		if !valid {
-			n++
+			count++
 		}
 	}
-	return n
+	return count
 }
 
-// At returns the value at i and whether it is present. Like indexing a slice,
-// At panics when i is outside [0, Len()). The value at a null row is unspecified.
-func (s Series[T]) At(i int) (value T, valid bool) {
-	value = s.values[i]
-	return value, s.validity == nil || s.validity[i]
+// IsValid reports whether row i is present. It panics when i is out of range.
+func (s Series[T]) IsValid(i int) bool {
+	_ = s.values[i]
+	return s.validity == nil || s.validity[i]
 }
 
-// Values returns a copy of the Series' physical values. Callers interested in
-// nulls should use At or Validity as values at null positions are unspecified.
+// At returns row i and whether it is present. A null row returns the zero value
+// of T and false. At panics when i is out of range, following ordinary slice
+// indexing.
+func (s Series[T]) At(i int) (T, bool) {
+	value := s.values[i]
+	if s.validity != nil && !s.validity[i] {
+		var zero T
+		return zero, false
+	}
+	return value, true
+}
+
+// ValueOr returns row i when present and fallback when it is null. It panics
+// when i is out of range; bounds errors are not treated as nulls.
+func (s Series[T]) ValueOr(i int, fallback T) T {
+	value := s.values[i]
+	if s.validity != nil && !s.validity[i] {
+		return fallback
+	}
+	return value
+}
+
+// FirstPresent returns the first non-null value and whether one exists.
+func (s Series[T]) FirstPresent() (T, bool) {
+	return reduce.FirstPresent[T](s, nil)
+}
+
+// LastPresent returns the last non-null value and whether one exists.
+func (s Series[T]) LastPresent() (T, bool) {
+	return reduce.LastPresent[T](s, nil)
+}
+
+// Values returns a shallow copy of the physical values. Values at null rows are
+// unspecified; pair this result with Validity when nulls matter. References
+// contained in element values remain shared.
 func (s Series[T]) Values() []T {
 	return slices.Clone(s.values)
 }
 
-// Validity returns one boolean per row, including an all-true slice for a
-// Series that has no null values.
+// Validity returns one boolean per row, where true means present. The returned
+// slice is a copy. A non-null Series returns an all-true slice.
 func (s Series[T]) Validity() []bool {
-	if s.validity == nil {
-		return slices.Repeat([]bool{true}, len(s.values))
+	if s.validity != nil {
+		return slices.Clone(s.validity)
 	}
-	return slices.Clone(s.validity)
+
+	return slices.Repeat([]bool{true}, len(s.values))
 }
 
-// Present returns an iterator over the present values in row order. Nulls are
-// skipped.
-func (s Series[T]) Present() iter.Seq[T] {
-	if s.validity == nil {
-		return slices.Values(s.values)
+// Optionals returns a materialized copy of all cells. Null cells contain the
+// zero value of T.
+func (s Series[T]) Optionals() []Optional[T] {
+	values := make([]Optional[T], len(s.values))
+	for i, value := range s.values {
+		if s.validity == nil || s.validity[i] {
+			values[i] = Some(value)
+		}
 	}
-	return func(yield func(T) bool) {
+	return values
+}
+
+// All iterates every row as its index and optional value.
+func (s Series[T]) All() iter.Seq2[int, Optional[T]] {
+	return func(yield func(int, Optional[T]) bool) {
 		for i, value := range s.values {
-			if s.validity[i] && !yield(value) {
+			cell := Optional[T]{}
+			if s.validity == nil || s.validity[i] {
+				cell = Some(value)
+			}
+			if !yield(i, cell) {
 				return
 			}
 		}
 	}
 }
 
-// All yields every row as (value, valid) in row order, including nulls. The
-// value at a null row is unspecified.
-func (s Series[T]) All() iter.Seq2[T, bool] {
-	if s.validity == nil {
-		return func(yield func(T, bool) bool) {
-			for _, value := range s.values {
-				if !yield(value, true) {
-					return
-				}
-			}
-		}
-	}
-	return func(yield func(T, bool) bool) {
-		for i, value := range s.values {
-			if !yield(value, s.validity[i]) {
-				return
-			}
-		}
-	}
-}
-
-// Each returns an iterator over the present values in row order, yielding each
-// row index with its value. Nulls are skipped.
-func (s Series[T]) Each() iter.Seq2[int, T] {
-	if s.validity == nil {
-		return func(yield func(int, T) bool) {
-			for i, value := range s.values {
-				if !yield(i, value) {
-					return
-				}
-			}
-		}
-	}
+// Present iterates non-null rows as their original index and value.
+func (s Series[T]) Present() iter.Seq2[int, T] {
 	return func(yield func(int, T) bool) {
 		for i, value := range s.values {
-			if s.validity[i] && !yield(i, value) {
+			if s.validity != nil && !s.validity[i] {
+				continue
+			}
+			if !yield(i, value) {
 				return
 			}
 		}
 	}
 }
 
-// Concat returns a Series containing s followed by each input Series in
-// order. The result is nullable when any input is nullable. Concatenating no
-// inputs returns s unchanged.
-func (s Series[T]) Concat(parts ...Series[T]) Series[T] {
-	if len(parts) == 0 {
+// EqualFunc reports whether s and other have equal lengths, validity, and
+// present values according to equal. It panics when equal is nil.
+func (s Series[T]) EqualFunc(other Series[T], equal func(T, T) bool) bool {
+	if equal == nil {
+		panic("series: EqualFunc: nil equality function")
+	}
+	if s.Len() != other.Len() {
+		return false
+	}
+	for i, value := range s.values {
+		valid := s.validity == nil || s.validity[i]
+		otherValid := other.validity == nil || other.validity[i]
+		if valid != otherValid {
+			return false
+		}
+		if valid && !equal(value, other.values[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// Equal reports whether a and b have equal lengths, validity, and present
+// values according to ==. NaN therefore remains unequal to itself.
+func Equal[T comparable](a, b Series[T]) bool {
+	return a.EqualFunc(b, func(x, y T) bool { return x == y })
+}
+
+// Concat returns s followed by others in order. The result is nullable when s
+// or any input is nullable. With no inputs, Concat returns s without copying.
+func (s Series[T]) Concat(others ...Series[T]) Series[T] {
+	if len(others) == 0 {
 		return s
 	}
 
-	valueParts := make([][]T, len(parts)+1)
-	valueParts[0] = s.values
+	maxInt := int(^uint(0) >> 1)
+	total := s.Len()
 	nullable := s.validity != nil
-	for i, part := range parts {
-		valueParts[i+1] = part.values
-		nullable = nullable || part.validity != nil
+	for _, other := range others {
+		if other.Len() > maxInt-total {
+			panic("series: Concat: length out of range")
+		}
+		total += other.Len()
+		nullable = nullable || other.validity != nil
 	}
 
-	result := Series[T]{values: slices.Concat(valueParts...)}
+	result := Series[T]{values: make([]T, total)}
+	offset := copy(result.values, s.values)
+	for _, other := range others {
+		offset += copy(result.values[offset:], other.values)
+	}
 	if !nullable {
 		return result
 	}
 
-	result.validity = slices.Repeat([]bool{true}, len(result.values))
+	result.validity = make([]bool, total)
+	for i := range result.validity {
+		result.validity[i] = true
+	}
+	offset = s.Len()
 	if s.validity != nil {
 		copy(result.validity, s.validity)
 	}
-	offset := len(s.values)
-	for _, part := range parts {
-		if part.validity != nil {
-			copy(result.validity[offset:], part.validity)
+	for _, other := range others {
+		if other.validity != nil {
+			copy(result.validity[offset:], other.validity)
 		}
-		offset += len(part.values)
+		offset += other.Len()
 	}
-
 	return result
 }
 
-// Map applies fn to every present value. Nulls are propagated and fn is not
-// called for them.
+// Map applies fn to present values. Nulls propagate without calling fn, and
+// the result preserves s's nullable schema.
 func (s Series[T]) Map[U any](fn func(T) U) Series[U] {
-	values := make([]U, len(s.values))
+	result := Series[U]{values: make([]U, s.Len())}
 	if s.validity == nil {
 		for i, value := range s.values {
-			values[i] = fn(value)
+			result.values[i] = fn(value)
 		}
-		return Series[U]{values: values}
+		return result
 	}
 
+	result.validity = slices.Clone(s.validity)
 	for i, value := range s.values {
 		if s.validity[i] {
-			values[i] = fn(value)
+			result.values[i] = fn(value)
 		}
 	}
-	return Series[U]{values: values, validity: slices.Clone(s.validity)}
+	return result
 }
 
-// TryMap is Map for transforms that can fail. It stops at the first error and
-// annotates it with the row index. Nulls are propagated without calling fn.
-func (s Series[T]) TryMap[U any](fn func(T) (U, error)) (Series[U], error) {
-	values := make([]U, len(s.values))
-	if s.validity == nil {
-		for i, value := range s.values {
-			mapped, err := fn(value)
-			if err != nil {
-				return Series[U]{}, fmt.Errorf("map row %d: %w", i, err)
-			}
-			values[i] = mapped
-		}
-		return Series[U]{values: values}, nil
+// MapCells applies fn to every cell, including null cells. It is the explicit
+// escape hatch for transforms whose output validity depends on input nulls.
+// The result is nullable even when every returned cell is present.
+func (s Series[T]) MapCells[U any](fn func(Optional[T]) Optional[U]) Series[U] {
+	result := Series[U]{
+		values:   make([]U, s.Len()),
+		validity: make([]bool, s.Len()),
 	}
-
 	for i, value := range s.values {
-		if !s.validity[i] {
+		cell := Optional[T]{}
+		if s.validity == nil || s.validity[i] {
+			cell = Some(value)
+		}
+		mapped := fn(cell)
+		if mapped.Valid {
+			result.values[i] = mapped.Value
+			result.validity[i] = true
+		}
+	}
+	return result
+}
+
+// MapOptional applies fn to present values. The boolean returned by fn reports
+// whether the mapped value is present, following Go's comma-ok convention.
+// Input nulls propagate without calling fn. The result is nullable even when
+// every mapped value is present.
+func (s Series[T]) MapOptional[U any](fn func(T) (U, bool)) Series[U] {
+	result := Series[U]{
+		values:   make([]U, s.Len()),
+		validity: make([]bool, s.Len()),
+	}
+	for i, value := range s.values {
+		if s.validity != nil && !s.validity[i] {
 			continue
 		}
+		mapped, valid := fn(value)
+		if valid {
+			result.values[i] = mapped
+			result.validity[i] = true
+		}
+	}
+	return result
+}
 
+// TryMap is Map for callbacks that can fail. It stops at the first error and
+// wraps it with the failing row index.
+func (s Series[T]) TryMap[U any](fn func(T) (U, error)) (Series[U], error) {
+	result := Series[U]{values: make([]U, s.Len())}
+	if s.validity != nil {
+		result.validity = slices.Clone(s.validity)
+	}
+	for i, value := range s.values {
+		if s.validity != nil && !s.validity[i] {
+			continue
+		}
 		mapped, err := fn(value)
 		if err != nil {
-			return Series[U]{}, fmt.Errorf("map row %d: %w", i, err)
+			return Series[U]{}, fmt.Errorf("series: TryMap: row %d: %w", i, err)
 		}
-		values[i] = mapped
+		result.values[i] = mapped
 	}
-
-	return Series[U]{values: values, validity: slices.Clone(s.validity)}, nil
+	return result, nil
 }
 
-// Map2 combines corresponding present values from s and other. A result row is
-// null, without calling fn, when either input row is null. Map2 panics when the
-// Series lengths differ.
+// TryMapCells is MapCells for callbacks that can fail. It stops at the first
+// error and wraps it with the failing row index.
+func (s Series[T]) TryMapCells[U any](fn func(Optional[T]) (Optional[U], error)) (Series[U], error) {
+	result := Series[U]{
+		values:   make([]U, s.Len()),
+		validity: make([]bool, s.Len()),
+	}
+	for i, value := range s.values {
+		cell := Optional[T]{}
+		if s.validity == nil || s.validity[i] {
+			cell = Some(value)
+		}
+		mapped, err := fn(cell)
+		if err != nil {
+			return Series[U]{}, fmt.Errorf("series: TryMapCells: row %d: %w", i, err)
+		}
+		if mapped.Valid {
+			result.values[i] = mapped.Value
+			result.validity[i] = true
+		}
+	}
+	return result, nil
+}
+
+// Map2 combines corresponding present rows of s and other. A result row is
+// null when either input row is null. It panics on length mismatch.
 func (s Series[T]) Map2[U, V any](other Series[U], fn func(T, U) V) Series[V] {
 	if s.Len() != other.Len() {
-		panic(fmt.Sprintf("series: Map2 length mismatch: left has %d rows, right has %d", s.Len(), other.Len()))
+		panic(fmt.Sprintf("series: Map2: length mismatch: left=%d right=%d", s.Len(), other.Len()))
 	}
-
-	values := make([]V, s.Len())
-	validity := combinedValidity(s.validity, other.validity)
-	if validity == nil {
-		for i, value := range s.values {
-			values[i] = fn(value, other.values[i])
-		}
-		return Series[V]{values: values}
+	result := Series[V]{
+		values:   make([]V, s.Len()),
+		validity: combinedValidity(s.validity, other.validity, s.Len()),
 	}
-
 	for i, value := range s.values {
-		if validity[i] {
-			values[i] = fn(value, other.values[i])
+		if result.validity == nil || result.validity[i] {
+			result.values[i] = fn(value, other.values[i])
 		}
 	}
-	return Series[V]{values: values, validity: validity}
+	return result
 }
 
-// TryMap2 is Map2 for transforms that can fail. It stops at the first error
-// and annotates it with the row index. Nulls are propagated without calling
-// fn. TryMap2 panics when the Series lengths differ.
+// Map2Cells combines every pair of corresponding cells, including null cells.
+// It panics on length mismatch.
+func (s Series[T]) Map2Cells[U, V any](other Series[U], fn func(Optional[T], Optional[U]) Optional[V]) Series[V] {
+	if s.Len() != other.Len() {
+		panic(fmt.Sprintf("series: Map2Cells: length mismatch: left=%d right=%d", s.Len(), other.Len()))
+	}
+	result := Series[V]{
+		values:   make([]V, s.Len()),
+		validity: make([]bool, s.Len()),
+	}
+	for i, value := range s.values {
+		left := Optional[T]{}
+		if s.validity == nil || s.validity[i] {
+			left = Some(value)
+		}
+		right := Optional[U]{}
+		if other.validity == nil || other.validity[i] {
+			right = Some(other.values[i])
+		}
+		mapped := fn(left, right)
+		if mapped.Valid {
+			result.values[i] = mapped.Value
+			result.validity[i] = true
+		}
+	}
+	return result
+}
+
+// TryMap2 is Map2 for callbacks that can fail. It stops at the first error and
+// wraps it with the failing row index. It panics on length mismatch.
 func (s Series[T]) TryMap2[U, V any](other Series[U], fn func(T, U) (V, error)) (Series[V], error) {
 	if s.Len() != other.Len() {
-		panic(fmt.Sprintf("series: TryMap2 length mismatch: left has %d rows, right has %d", s.Len(), other.Len()))
+		panic(fmt.Sprintf("series: TryMap2: length mismatch: left=%d right=%d", s.Len(), other.Len()))
 	}
-
-	values := make([]V, s.Len())
-	validity := combinedValidity(s.validity, other.validity)
-	if validity == nil {
-		for i, value := range s.values {
-			mapped, err := fn(value, other.values[i])
-			if err != nil {
-				return Series[V]{}, fmt.Errorf("map row %d: %w", i, err)
-			}
-			values[i] = mapped
-		}
-		return Series[V]{values: values}, nil
+	result := Series[V]{
+		values:   make([]V, s.Len()),
+		validity: combinedValidity(s.validity, other.validity, s.Len()),
 	}
-
 	for i, value := range s.values {
-		if !validity[i] {
+		if result.validity != nil && !result.validity[i] {
 			continue
 		}
 		mapped, err := fn(value, other.values[i])
 		if err != nil {
-			return Series[V]{}, fmt.Errorf("map row %d: %w", i, err)
+			return Series[V]{}, fmt.Errorf("series: TryMap2: row %d: %w", i, err)
 		}
-		values[i] = mapped
+		result.values[i] = mapped
 	}
-	return Series[V]{values: values, validity: validity}, nil
+	return result, nil
 }
 
-func combinedValidity(left, right []bool) []bool {
-	switch {
-	case left == nil && right == nil:
-		return nil
-	case left == nil:
-		return slices.Clone(right)
-	case right == nil:
-		return slices.Clone(left)
-	default:
-		validity := make([]bool, len(left))
-		for i := range validity {
-			validity[i] = left[i] && right[i]
-		}
-		return validity
+// TryMap2Cells is Map2Cells for callbacks that can fail. It stops at the first
+// error and wraps it with the failing row index. It panics on length mismatch.
+func (s Series[T]) TryMap2Cells[U, V any](other Series[U], fn func(Optional[T], Optional[U]) (Optional[V], error)) (Series[V], error) {
+	if s.Len() != other.Len() {
+		panic(fmt.Sprintf("series: TryMap2Cells: length mismatch: left=%d right=%d", s.Len(), other.Len()))
 	}
-}
-
-// Reduce folds the present values from left to right. Nulls are skipped.
-func (s Series[T]) Reduce[A any](initial A, fn func(A, T) A) A {
-	acc := initial
-	if s.validity == nil {
-		for _, value := range s.values {
-			acc = fn(acc, value)
-		}
-		return acc
+	result := Series[V]{
+		values:   make([]V, s.Len()),
+		validity: make([]bool, s.Len()),
 	}
 	for i, value := range s.values {
-		if s.validity[i] {
-			acc = fn(acc, value)
+		left := Optional[T]{}
+		if s.validity == nil || s.validity[i] {
+			left = Some(value)
+		}
+		right := Optional[U]{}
+		if other.validity == nil || other.validity[i] {
+			right = Some(other.values[i])
+		}
+		mapped, err := fn(left, right)
+		if err != nil {
+			return Series[V]{}, fmt.Errorf("series: TryMap2Cells: row %d: %w", i, err)
+		}
+		if mapped.Valid {
+			result.values[i] = mapped.Value
+			result.validity[i] = true
 		}
 	}
-	return acc
+	return result, nil
 }
 
-// Sum returns the sum of the present values and whether at least one value was
-// present. Arithmetic uses T and follows Go's normal overflow behavior.
-func Sum[T Number](s Series[T]) (T, bool) {
-	var total T
-	if s.validity == nil {
-		if len(s.values) == 0 {
-			return total, false
-		}
-		for _, value := range s.values {
-			total += value
-		}
-		return total, true
+// Scan folds present values from left to right and returns the running
+// accumulations. Null rows remain null and leave the accumulator unchanged.
+func (s Series[T]) Scan[R any](initial R, fn func(R, T) R) Series[R] {
+	result := Series[R]{values: make([]R, s.Len())}
+	if s.validity != nil {
+		result.validity = slices.Clone(s.validity)
 	}
-
-	found := false
+	accumulator := initial
 	for i, value := range s.values {
-		if s.validity[i] {
-			total += value
-			found = true
-		}
-	}
-	return total, found
-}
-
-// Mean returns the arithmetic mean of the present values and whether at least
-// one value was present. Values are converted to float64 before summation.
-func Mean[T Number](s Series[T]) (float64, bool) {
-	if s.validity == nil {
-		if len(s.values) == 0 {
-			return 0, false
-		}
-		var total float64
-		for _, value := range s.values {
-			total += float64(value)
-		}
-		return total / float64(len(s.values)), true
-	}
-
-	var total float64
-	count := 0
-	for i, value := range s.values {
-		if s.validity[i] {
-			total += float64(value)
-			count++
-		}
-	}
-	if count == 0 {
-		return 0, false
-	}
-	return total / float64(count), true
-}
-
-// Min returns the smallest present value and whether at least one value was
-// present. If any present floating-point value is NaN, Min returns NaN.
-func Min[T cmp.Ordered](s Series[T]) (T, bool) {
-	if s.validity == nil {
-		if len(s.values) == 0 {
-			var zero T
-			return zero, false
-		}
-		return slices.Min(s.values), true
-	}
-
-	var minimum T
-	found := false
-	for i, value := range s.values {
-		if !s.validity[i] {
+		if s.validity != nil && !s.validity[i] {
 			continue
 		}
-		if !found {
-			minimum = value
-			found = true
-			continue
-		}
-		minimum = min(minimum, value)
+		accumulator = fn(accumulator, value)
+		result.values[i] = accumulator
 	}
-	return minimum, found
+	return result
 }
 
-// Max returns the largest present value and whether at least one value was
-// present. If any present floating-point value is NaN, Max returns NaN.
-func Max[T cmp.Ordered](s Series[T]) (T, bool) {
-	if s.validity == nil {
-		if len(s.values) == 0 {
-			var zero T
-			return zero, false
-		}
-		return slices.Max(s.values), true
-	}
-
-	var maximum T
-	found := false
+// Reduce folds present values from left to right. Nulls are skipped.
+func (s Series[T]) Reduce[R any](initial R, fn func(R, T) R) R {
+	result := initial
 	for i, value := range s.values {
-		if !s.validity[i] {
-			continue
+		if s.validity == nil || s.validity[i] {
+			result = fn(result, value)
 		}
-		if !found {
-			maximum = value
-			found = true
-			continue
-		}
-		maximum = max(maximum, value)
 	}
-	return maximum, found
+	return result
 }
 
-// FillNull returns a non-nullable Series in which nulls have been replaced by
-// value. A non-nullable Series is returned unchanged.
+// SortedFunc returns a stable ordering of s using compare. Nulls sort last and
+// are never passed to compare. The comparator follows cmp.Compare and
+// slices.SortFunc by returning negative, zero, or positive.
+func (s Series[T]) SortedFunc(compare func(T, T) int) Series[T] {
+	if s.Len() < 2 {
+		return s
+	}
+	if s.validity == nil {
+		values := slices.Clone(s.values)
+		slices.SortStableFunc(values, compare)
+		return Series[T]{values: values}
+	}
+
+	rows := make([]int, s.Len())
+	for i := range rows {
+		rows[i] = i
+	}
+	slices.SortStableFunc(rows, func(left, right int) int {
+		leftValid := s.validity[left]
+		rightValid := s.validity[right]
+		switch {
+		case !leftValid && !rightValid:
+			return 0
+		case !leftValid:
+			return 1
+		case !rightValid:
+			return -1
+		default:
+			return compare(s.values[left], s.values[right])
+		}
+	})
+	return s.Take(rows)
+}
+
+// Filter returns rows selected by mask in their original order. The result
+// preserves s's nullable schema. Filter panics on length mismatch.
+func (s Series[T]) Filter(selection mask.Mask) Series[T] {
+	if s.Len() != selection.Len() {
+		panic(fmt.Sprintf("series: Filter: length mismatch: series=%d mask=%d", s.Len(), selection.Len()))
+	}
+
+	result := Series[T]{values: make([]T, selection.Count())}
+	if s.validity != nil {
+		result.validity = make([]bool, len(result.values))
+	}
+
+	i := 0
+	for row := range selection.Rows() {
+		result.values[i] = s.values[row]
+		if result.validity != nil {
+			result.validity[i] = s.validity[row]
+		}
+		i++
+	}
+	return result
+}
+
+// Take returns rows at the requested indexes in the supplied order. Repeated
+// indexes produce repeated rows. The result preserves s's nullable schema.
+// Take panics on an invalid index.
+func (s Series[T]) Take(rows []int) Series[T] {
+	result := Series[T]{values: make([]T, len(rows))}
+	if s.validity != nil {
+		result.validity = make([]bool, len(rows))
+	}
+
+	for i, row := range rows {
+		result.values[i] = s.values[row]
+		if result.validity != nil {
+			result.validity[i] = s.validity[row]
+		}
+	}
+	return result
+}
+
+// TakeNullable returns rows selected by nullable indexes. A null index creates
+// a null result row; a present index inherits the selected source row's
+// validity. The result is always nullable. TakeNullable panics when a present
+// index is outside [0, Len()).
+func (s Series[T]) TakeNullable(rows Series[int]) Series[T] {
+	result := Series[T]{
+		values:   make([]T, rows.Len()),
+		validity: make([]bool, rows.Len()),
+	}
+	for i, row := range rows.values {
+		if rows.validity != nil && !rows.validity[i] {
+			continue
+		}
+		result.values[i] = s.values[row]
+		result.validity[i] = s.validity == nil || s.validity[row]
+	}
+	return result
+}
+
+// Head returns the first min(n, Len()) rows, preserves s's nullable schema, and
+// shares storage with s. It panics when n is negative.
+func (s Series[T]) Head(n int) Series[T] {
+	if n < 0 {
+		panic("series: Head: negative count")
+	}
+	return s.Slice(0, min(n, s.Len()))
+}
+
+// Tail returns the last min(n, Len()) rows, preserves s's nullable schema, and
+// shares storage with s. It panics when n is negative.
+func (s Series[T]) Tail(n int) Series[T] {
+	if n < 0 {
+		panic("series: Tail: negative count")
+	}
+	count := min(n, s.Len())
+	return s.Slice(s.Len()-count, s.Len())
+}
+
+// Slice returns rows in the half-open interval [start, end), preserves s's
+// nullable schema, and shares storage with s. It panics on invalid bounds,
+// like slicing a Go slice.
+func (s Series[T]) Slice(start, end int) Series[T] {
+	result := Series[T]{values: s.values[start:end:end]}
+	if s.validity != nil {
+		result.validity = s.validity[start:end:end]
+	}
+	return result
+}
+
+// IsNull returns a Mask with the same length as s that selects its null rows.
+func (s Series[T]) IsNull() mask.Mask {
+	if s.validity == nil {
+		return mask.None(s.Len())
+	}
+	nullCount := s.NullCount()
+	if nullCount == 0 {
+		return mask.None(s.Len())
+	}
+	if nullCount == s.Len() {
+		return mask.All(s.Len())
+	}
+	return mask.NewFunc(s.Len(), func(i int) bool { return !s.validity[i] })
+}
+
+// IsNotNull returns a Mask with the same length as s that selects its present
+// rows.
+func (s Series[T]) IsNotNull() mask.Mask {
+	if s.validity == nil {
+		return mask.All(s.Len())
+	}
+	nullCount := s.NullCount()
+	if nullCount == 0 {
+		return mask.All(s.Len())
+	}
+	if nullCount == s.Len() {
+		return mask.None(s.Len())
+	}
+	return mask.New(s.validity)
+}
+
+// FillNull replaces null rows with value and returns a non-null Series. When s
+// contains no null rows, the result shares value storage with s.
 func (s Series[T]) FillNull(value T) Series[T] {
 	if s.validity == nil {
 		return s
 	}
 
-	var values []T
+	nullCount := s.NullCount()
+	if nullCount == 0 {
+		return Series[T]{values: s.values}
+	}
+	if nullCount == s.Len() {
+		return Repeat(value, s.Len())
+	}
+
+	values := slices.Clip(slices.Clone(s.values))
 	for i, valid := range s.validity {
 		if !valid {
-			if values == nil {
-				values = slices.Clone(s.values)
-			}
 			values[i] = value
 		}
-	}
-	if values == nil {
-		values = s.values
 	}
 	return Series[T]{values: values}
 }
 
-// DropNull returns a non-nullable Series containing only present values.
+// DropNull returns the present rows as a non-null Series. When s contains no
+// null rows, the result shares value storage with s.
 func (s Series[T]) DropNull() Series[T] {
 	if s.validity == nil {
 		return s
 	}
 
-	n := 0
-	for _, valid := range s.validity {
-		if valid {
-			n++
-		}
-	}
-	if n == len(s.values) {
+	nullCount := s.NullCount()
+	if nullCount == 0 {
 		return Series[T]{values: s.values}
 	}
+	if nullCount == s.Len() {
+		return Series[T]{}
+	}
 
-	values := make([]T, 0, n)
+	values := make([]T, 0, s.Len()-nullCount)
 	for i, value := range s.values {
 		if s.validity[i] {
 			values = append(values, value)
@@ -506,316 +698,13 @@ func (s Series[T]) DropNull() Series[T] {
 	return Series[T]{values: values}
 }
 
-// PresentRows returns the row indexes of present values in order.
-func (s Series[T]) PresentRows() []int {
-	if s.validity == nil {
-		rows := make([]int, len(s.values))
-		for row := range rows {
-			rows[row] = row
-		}
-		return rows
+func combinedValidity(left, right []bool, length int) []bool {
+	if left == nil && right == nil {
+		return nil
 	}
-	rows := make([]int, 0, len(s.values))
-	for row, valid := range s.validity {
-		if valid {
-			rows = append(rows, row)
-		}
+	validity := make([]bool, length)
+	for i := range validity {
+		validity[i] = (left == nil || left[i]) && (right == nil || right[i])
 	}
-	return rows
-}
-
-// MatchingRows returns the indexes of present values for which predicate
-// returns true. Nulls are excluded without calling predicate.
-func (s Series[T]) MatchingRows(predicate func(T) bool) []int {
-	rows := make([]int, 0, len(s.values))
-	if s.validity == nil {
-		for i, value := range s.values {
-			if predicate(value) {
-				rows = append(rows, i)
-			}
-		}
-		return rows
-	}
-	for i, value := range s.values {
-		if s.validity[i] && predicate(value) {
-			rows = append(rows, i)
-		}
-	}
-	return rows
-}
-
-type rowKey[T comparable] struct {
-	value T
-	valid bool
-}
-
-// GroupRows partitions row indexes by Go equality of present values. Groups
-// and their rows retain first-seen order. Nulls form one group distinct from
-// the zero value of T. Because NaN is not equal to itself, each present NaN
-// forms a separate group. No returned group is empty.
-func GroupRows[T comparable](s Series[T]) [][]int {
-	if s.validity == nil {
-		positions := make(map[T]int, s.Len())
-		groups := make([][]int, 0, s.Len())
-		for row, value := range s.values {
-			position, exists := positions[value]
-			if !exists {
-				position = len(groups)
-				positions[value] = position
-				groups = append(groups, nil)
-			}
-			groups[position] = append(groups[position], row)
-		}
-		return groups
-	}
-
-	positions := make(map[rowKey[T]]int, s.Len())
-	groups := make([][]int, 0, s.Len())
-	for row, value := range s.values {
-		valid := s.validity[row]
-		if !valid {
-			var zero T
-			value = zero
-		}
-
-		key := rowKey[T]{value: value, valid: valid}
-		position, exists := positions[key]
-		if !exists {
-			position = len(groups)
-			positions[key] = position
-			groups = append(groups, nil)
-		}
-		groups[position] = append(groups[position], row)
-	}
-
-	return groups
-}
-
-// UniqueRows returns the first row index for each distinct value in s. Row
-// indexes retain first-seen order, nulls form one value distinct from the zero
-// value of T, and present values use Go equality, so each NaN is distinct.
-func UniqueRows[T comparable](s Series[T]) []int {
-	rows := make([]int, 0, s.Len())
-	if s.validity == nil {
-		seen := make(map[T]struct{}, s.Len())
-		for row, value := range s.values {
-			if _, exists := seen[value]; exists {
-				continue
-			}
-			seen[value] = struct{}{}
-			rows = append(rows, row)
-		}
-		return rows
-	}
-
-	seen := make(map[rowKey[T]]struct{}, s.Len())
-	for row, value := range s.values {
-		valid := s.validity[row]
-		if !valid {
-			var zero T
-			value = zero
-		}
-		key := rowKey[T]{value: value, valid: valid}
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		seen[key] = struct{}{}
-		rows = append(rows, row)
-	}
-	return rows
-}
-
-// Unique returns the first occurrence of each distinct value in s. Values
-// retain first-seen order, nulls form one value distinct from the zero value of
-// T, and the result preserves s's nullability. Present values use Go equality,
-// so each NaN is distinct.
-func Unique[T comparable](s Series[T]) Series[T] {
-	return s.Take(UniqueRows(s))
-}
-
-// JoinRows returns matching row-index pairs for an inner join using Go
-// equality. Pairs retain left-row order and then right-row order. Nulls never
-// match. Because NaN is not equal to itself, present NaNs do not match.
-func JoinRows[T comparable](left, right Series[T]) (leftRows, rightRows []int) {
-	rightByValue := presentRowsByValue(right)
-	leftRows = make([]int, 0, left.Len())
-	rightRows = make([]int, 0, left.Len())
-
-	if left.validity == nil {
-		for row, value := range left.values {
-			for _, rightRow := range rightByValue[value] {
-				leftRows = append(leftRows, row)
-				rightRows = append(rightRows, rightRow)
-			}
-		}
-		return leftRows, rightRows
-	}
-
-	for row, value := range left.values {
-		if left.validity[row] {
-			for _, rightRow := range rightByValue[value] {
-				leftRows = append(leftRows, row)
-				rightRows = append(rightRows, rightRow)
-			}
-		}
-	}
-
-	return leftRows, rightRows
-}
-
-// LeftJoinRows returns left row indexes and nullable right row indexes for a
-// left join using Go equality. Rows retain left-row order and then right-row
-// order. Each unmatched left row appears once with a null right row. Nulls
-// never match. Because NaN is not equal to itself, present NaNs do not match.
-func LeftJoinRows[T comparable](left, right Series[T]) (leftRows []int, rightRows Series[int]) {
-	rightByValue := presentRowsByValue(right)
-	leftRows = make([]int, 0, left.Len())
-	rightRows = Series[int]{
-		values:   make([]int, 0, left.Len()),
-		validity: make([]bool, 0, left.Len()),
-	}
-	if left.validity == nil {
-		for row, value := range left.values {
-			matches := rightByValue[value]
-			if len(matches) > 0 {
-				for _, rightRow := range matches {
-					leftRows = append(leftRows, row)
-					rightRows.values = append(rightRows.values, rightRow)
-					rightRows.validity = append(rightRows.validity, true)
-				}
-				continue
-			}
-
-			leftRows = append(leftRows, row)
-			rightRows.values = append(rightRows.values, 0)
-			rightRows.validity = append(rightRows.validity, false)
-		}
-		return leftRows, rightRows
-	}
-
-	for row, value := range left.values {
-		if left.validity[row] {
-			matches := rightByValue[value]
-			if len(matches) > 0 {
-				for _, rightRow := range matches {
-					leftRows = append(leftRows, row)
-					rightRows.values = append(rightRows.values, rightRow)
-					rightRows.validity = append(rightRows.validity, true)
-				}
-				continue
-			}
-		}
-
-		leftRows = append(leftRows, row)
-		rightRows.values = append(rightRows.values, 0)
-		rightRows.validity = append(rightRows.validity, false)
-	}
-	return leftRows, rightRows
-}
-
-func presentRowsByValue[T comparable](s Series[T]) map[T][]int {
-	rows := make(map[T][]int, s.Len())
-	if s.validity == nil {
-		for row, value := range s.values {
-			rows[value] = append(rows[value], row)
-		}
-		return rows
-	}
-	for row, value := range s.values {
-		if s.validity[row] {
-			rows[value] = append(rows[value], row)
-		}
-	}
-	return rows
-}
-
-// SortedRows returns row indexes ordered by compare. The sort is stable: rows
-// that compare equally retain their original order. Nulls are placed first or
-// last without calling compare.
-func (s Series[T]) SortedRows(compare func(T, T) int, nullsFirst bool) []int {
-	if s.validity == nil {
-		present := make([]int, len(s.values))
-		for i := range present {
-			present[i] = i
-		}
-		slices.SortStableFunc(present, func(left, right int) int {
-			return compare(s.values[left], s.values[right])
-		})
-		return present
-	}
-
-	present := make([]int, 0, len(s.values))
-	nulls := make([]int, 0)
-	for i, valid := range s.validity {
-		if valid {
-			present = append(present, i)
-		} else {
-			nulls = append(nulls, i)
-		}
-	}
-
-	slices.SortStableFunc(present, func(left, right int) int {
-		return compare(s.values[left], s.values[right])
-	})
-	if nullsFirst {
-		return append(nulls, present...)
-	}
-	return append(present, nulls...)
-}
-
-// Slice returns a Series containing rows in the half-open range [start:end].
-// It shares immutable backing storage with s and panics when the bounds would
-// be invalid for a Go slice.
-func (s Series[T]) Slice(start, end int) Series[T] {
-	if start < 0 || end < start || end > s.Len() {
-		panic(fmt.Sprintf("series: slice bounds out of range [%d:%d] with length %d", start, end, s.Len()))
-	}
-
-	values := s.values[start:end:end]
-	if s.validity == nil {
-		return Series[T]{values: values}
-	}
-	return Series[T]{
-		values:   values,
-		validity: s.validity[start:end:end],
-	}
-}
-
-// Take returns a Series containing the requested row indexes in order. Like
-// indexing a slice, it panics if any row is outside [0, Len()).
-func (s Series[T]) Take(rows []int) Series[T] {
-	values := make([]T, len(rows))
-	if s.validity == nil {
-		for i, row := range rows {
-			values[i] = s.values[row]
-		}
-		return Series[T]{values: values}
-	}
-
-	validity := make([]bool, len(rows))
-	for i, row := range rows {
-		values[i] = s.values[row]
-		validity[i] = s.validity[row]
-	}
-	return Series[T]{values: values, validity: validity}
-}
-
-// TakeNullable returns a nullable Series selected by nullable row indexes. A
-// null row index produces a null result; a present row index inherits the
-// source row's validity. Like indexing a slice, it panics if any present row is
-// outside [0, Len()).
-func (s Series[T]) TakeNullable(rows Series[int]) Series[T] {
-	values := make([]T, rows.Len())
-	validity := make([]bool, rows.Len())
-	for i, row := range rows.values {
-		if rows.isValid(i) {
-			values[i] = s.values[row]
-			validity[i] = s.isValid(row)
-		}
-	}
-	return Series[T]{values: values, validity: validity}
-}
-
-func (s Series[T]) isValid(i int) bool {
-	return s.validity == nil || s.validity[i]
+	return validity
 }

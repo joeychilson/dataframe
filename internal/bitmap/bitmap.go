@@ -146,7 +146,7 @@ func (b Bitmap) All() bool {
 		return remainder == 0 || b.words[fullWords]&(uint64(1)<<remainder-1) == uint64(1)<<remainder-1
 	}
 	words := wordCount(b.length)
-	for i := 0; i < words; i++ {
+	for i := range words {
 		word := b.word(i)
 		remaining := b.length - i*bitsPerWord
 		if remaining >= bitsPerWord {
@@ -216,7 +216,8 @@ func (b Bitmap) Slice(start, end int) Bitmap {
 	}
 }
 
-// Copy copies every bit from source into b starting at start.
+// Copy copies every bit from source into b starting at start. Source and b may
+// share storage; Copy behaves as if source were copied to a temporary bitmap.
 func (b *Bitmap) Copy(start int, source Bitmap) {
 	if start < 0 || start > b.length-source.length {
 		panic("bitmap: copy out of range")
@@ -224,10 +225,21 @@ func (b *Bitmap) Copy(start int, source Bitmap) {
 	if b.offset == 0 && source.offset == 0 && start%bitsPerWord == 0 {
 		destination := b.words[start/bitsPerWord:]
 		fullWords := source.length / bitsPerWord
+		remainder := source.length % bitsPerWord
+		trailingWord := uint64(0)
+		if remainder != 0 {
+			trailingWord = source.words[fullWords]
+		}
 		copy(destination, source.words[:fullWords])
-		if remainder := source.length % bitsPerWord; remainder != 0 {
+		if remainder != 0 {
 			mask := uint64(1)<<remainder - 1
-			destination[fullWords] = destination[fullWords]&^mask | source.words[fullWords]&mask
+			destination[fullWords] = destination[fullWords]&^mask | trailingWord&mask
+		}
+		return
+	}
+	if requiresBackwardCopy(*b, start, source) {
+		for i := source.length; i > 0; i-- {
+			b.set(start+i-1, source.at(i-1))
 		}
 		return
 	}
@@ -351,6 +363,10 @@ func (b Bitmap) UnsetRows() iter.Seq[int] {
 	}
 }
 
+func wordCount(n int) int {
+	return (n + bitsPerWord - 1) / bitsPerWord
+}
+
 func (b Bitmap) at(i int) bool {
 	absolute := b.offset + i
 	return b.words[absolute/bitsPerWord]&(uint64(1)<<(absolute%bitsPerWord)) != 0
@@ -381,6 +397,17 @@ func (b Bitmap) word(i int) uint64 {
 	return word
 }
 
-func wordCount(n int) int {
-	return (n + bitsPerWord - 1) / bitsPerWord
+func requiresBackwardCopy(destination Bitmap, start int, source Bitmap) bool {
+	if source.length == 0 {
+		return false
+	}
+	destinationStart := destination.offset + start
+	destinationWord := &destination.words[destinationStart/bitsPerWord]
+	for i := range source.words {
+		if destinationWord == &source.words[i] {
+			relativeStart := i*bitsPerWord + destinationStart%bitsPerWord
+			return relativeStart > source.offset && relativeStart < source.offset+source.length
+		}
+	}
+	return false
 }

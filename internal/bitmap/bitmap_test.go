@@ -1,6 +1,7 @@
 package bitmap
 
 import (
+	"runtime"
 	"slices"
 	"testing"
 )
@@ -107,4 +108,69 @@ func TestAlignedCopyPreservesAdjacentBits(t *testing.T) {
 	if got := destination.Bools(); !slices.Equal(got, want) {
 		t.Fatalf("Copy bits = %v, want %v", got, want)
 	}
+}
+
+func TestCopyOverlap(t *testing.T) {
+	lengths := []int{0, 1, 63, 64, 65, 127, 128, 129}
+	tests := []struct {
+		name                 string
+		destinationViewStart int
+		destinationStart     int
+		sourceStart          int
+	}{
+		{name: "aligned forward", destinationStart: 64},
+		{name: "aligned backward", sourceStart: 64},
+		{name: "unaligned forward", destinationViewStart: 1, destinationStart: 1, sourceStart: 1},
+		{name: "unaligned backward", destinationViewStart: 1, sourceStart: 2},
+		{name: "unaligned forward across words", destinationStart: 66, sourceStart: 1},
+		{name: "unaligned backward across words", destinationStart: 1, sourceStart: 66},
+		{name: "unaligned forward word view", destinationViewStart: 65},
+		{name: "unaligned backward word view", destinationViewStart: 64, sourceStart: 65},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			for _, length := range lengths {
+				values := make([]bool, 260)
+				for i := range values {
+					values[i] = i%3 == 0 || i%11 == 0
+				}
+				want := slices.Clone(values)
+				destinationStart := test.destinationViewStart + test.destinationStart
+				copy(want[destinationStart:destinationStart+length], want[test.sourceStart:test.sourceStart+length])
+
+				bitmap := FromBools(values)
+				destination := bitmap.Slice(test.destinationViewStart, bitmap.Len())
+				source := bitmap.Slice(test.sourceStart, test.sourceStart+length)
+				destination.Copy(test.destinationStart, source)
+				if got := bitmap.Bools(); !slices.Equal(got, want) {
+					t.Fatalf("Copy length %d differs from built-in copy", length)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkCopy(b *testing.B) {
+	const size = 1 << 16
+
+	b.Run("Aligned", func(b *testing.B) {
+		source := Filled(size)
+		destination := New(size)
+		b.ReportAllocs()
+		for b.Loop() {
+			destination.Copy(0, source)
+		}
+		runtime.KeepAlive(destination)
+	})
+
+	b.Run("Unaligned", func(b *testing.B) {
+		source := Filled(size+1).Slice(1, size+1)
+		destination := New(size + 1)
+		b.ReportAllocs()
+		for b.Loop() {
+			destination.Copy(1, source)
+		}
+		runtime.KeepAlive(destination)
+	})
 }

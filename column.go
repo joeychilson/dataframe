@@ -176,7 +176,7 @@ func (c reflectColumnSpec) columnConcat(others []ColumnSpec) (ColumnSpec, error)
 			return nil, fmt.Errorf("%w: column %q type %v does not match %v", ErrSchemaMismatch, c.name, other.columnType(), c.typeOf)
 		}
 		if other.columnLen() > maxInt-total {
-			panic("dataframe: column concatenation length out of range")
+			return nil, fmt.Errorf("%w: concatenated column %q length overflows int", ErrRowCount, c.name)
 		}
 		total += other.columnLen()
 		nullable = nullable || other.columnNullable()

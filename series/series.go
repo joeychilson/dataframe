@@ -216,6 +216,7 @@ func Equal[T comparable](a, b Series[T]) bool {
 
 // Concat returns s followed by others in order. The result is nullable when s
 // or any input is nullable. With no inputs, Concat returns s without copying.
+// It panics if the resulting length overflows int.
 func (s Series[T]) Concat(others ...Series[T]) Series[T] {
 	if len(others) == 0 {
 		return s
@@ -413,10 +414,11 @@ func (s Series[T]) Map2Cells[U, V any](other Series[U], fn func(Optional[T], Opt
 }
 
 // TryMap2 is Map2 for callbacks that can fail. It stops at the first error and
-// wraps it with the failing row index. It panics on length mismatch.
+// wraps it with the failing row index. It returns an error wrapping
+// ErrLengthMismatch when the input lengths differ.
 func (s Series[T]) TryMap2[U, V any](other Series[U], fn func(T, U) (V, error)) (Series[V], error) {
 	if s.Len() != other.Len() {
-		panic(fmt.Sprintf("series: TryMap2: length mismatch: left=%d right=%d", s.Len(), other.Len()))
+		return Series[V]{}, fmt.Errorf("%w: left=%d right=%d", ErrLengthMismatch, s.Len(), other.Len())
 	}
 	result := Series[V]{
 		values:   make([]V, s.Len()),
@@ -436,10 +438,11 @@ func (s Series[T]) TryMap2[U, V any](other Series[U], fn func(T, U) (V, error)) 
 }
 
 // TryMap2Cells is Map2Cells for callbacks that can fail. It stops at the first
-// error and wraps it with the failing row index. It panics on length mismatch.
+// error and wraps it with the failing row index. It returns an error wrapping
+// ErrLengthMismatch when the input lengths differ.
 func (s Series[T]) TryMap2Cells[U, V any](other Series[U], fn func(Optional[T], Optional[U]) (Optional[V], error)) (Series[V], error) {
 	if s.Len() != other.Len() {
-		panic(fmt.Sprintf("series: TryMap2Cells: length mismatch: left=%d right=%d", s.Len(), other.Len()))
+		return Series[V]{}, fmt.Errorf("%w: left=%d right=%d", ErrLengthMismatch, s.Len(), other.Len())
 	}
 	result := Series[V]{
 		values:   make([]V, s.Len()),

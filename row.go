@@ -36,10 +36,10 @@ func (f Frame) Row(i int) Row {
 
 // Get returns column, whether its cell is present, and any dynamic-schema
 // error. Missing columns return ErrColumnNotFound and type mismatches return
-// ErrColumnType.
+// ErrColumnType. The zero Row returns ErrInvalidRow.
 func (r Row) Get[T any](column string) (value T, present bool, err error) {
 	if r.frame == nil {
-		panic("dataframe: Get: zero Row")
+		return value, false, fmt.Errorf("%w: zero value", ErrInvalidRow)
 	}
 	index := r.frame.columnIndex(column)
 	if index < 0 {

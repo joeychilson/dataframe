@@ -205,10 +205,11 @@ func (g Grouped[K]) Map[T, U any](values series.Series[T], fn func(series.Series
 }
 
 // TryMap is Map for callbacks that can fail. It stops at the first error and
-// wraps it with the zero-based group index.
+// wraps it with the zero-based group index. A values length that differs from
+// the source frame returns ErrRowCount.
 func (g Grouped[K]) TryMap[T, U any](values series.Series[T], fn func(series.Series[T]) (U, bool, error)) (series.Series[U], error) {
 	if values.Len() != g.source.Len() {
-		panic(fmt.Sprintf("dataframe: Grouped.TryMap: length mismatch: frame=%d series=%d", g.source.Len(), values.Len()))
+		return series.Series[U]{}, fmt.Errorf("%w: grouped values have %d rows, want %d", ErrRowCount, values.Len(), g.source.Len())
 	}
 	result := make([]U, len(g.rows))
 	validity := make([]bool, len(g.rows))

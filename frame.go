@@ -473,7 +473,7 @@ func (f Frame) Concat(others ...Frame) (Frame, error) {
 			}
 		}
 		if other.Len() > maxInt-total {
-			panic("dataframe: Concat: row count out of range")
+			return Frame{}, fmt.Errorf("%w: concatenated row count overflows int", ErrRowCount)
 		}
 		total += other.Len()
 	}

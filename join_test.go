@@ -352,6 +352,14 @@ func TestCrossJoin(t *testing.T) {
 	}
 }
 
+func TestCrossJoinRowCountOverflowReturnsError(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	_, err := (Frame{rowCount: maxInt}).CrossJoin(Frame{rowCount: 2})
+	if !errors.Is(err, ErrRowCount) {
+		t.Fatalf("CrossJoin() overflow error = %v, want ErrRowCount", err)
+	}
+}
+
 func BenchmarkInnerJoin(b *testing.B) {
 	const size = 10_000
 	keys := make([]int, size)

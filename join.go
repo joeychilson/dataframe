@@ -166,7 +166,7 @@ func (f Frame) CrossJoin(right Frame) (Frame, error) {
 	}
 	maxInt := int(^uint(0) >> 1)
 	if right.Len() != 0 && f.Len() > maxInt/right.Len() {
-		panic("dataframe: CrossJoin: row count out of range")
+		return Frame{}, fmt.Errorf("%w: cross join row count overflows int", ErrRowCount)
 	}
 	total := f.Len() * right.Len()
 	leftRows := make([]int, 0, total)

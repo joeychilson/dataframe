@@ -54,7 +54,8 @@ func (k SortKey) NullsLast() SortKey {
 }
 
 // SortedBy returns f stably ordered by successive keys. Earlier keys take
-// precedence. It panics when any key length differs from f.Len().
+// precedence. It panics when a key is the zero SortKey or its length differs
+// from f.Len().
 func (f Frame) SortedBy(keys ...SortKey) Frame {
 	if len(keys) == 0 || f.Len() < 2 {
 		for i, key := range keys {

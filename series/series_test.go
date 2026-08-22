@@ -1218,10 +1218,6 @@ func TestMap2LengthMismatchPanics(t *testing.T) {
 	}{
 		{name: "Map2", call: func() { left.Map2(right, func(a, b int) int { return a + b }) }},
 		{name: "Map2Cells", call: func() { left.Map2Cells(right, func(a, b Optional[int]) Optional[int] { return a }) }},
-		{name: "TryMap2", call: func() { left.TryMap2(right, func(a, b int) (int, error) { return a + b, nil }) }},
-		{name: "TryMap2Cells", call: func() {
-			left.TryMap2Cells(right, func(a, b Optional[int]) (Optional[int], error) { return a, nil })
-		}},
 	}
 
 	for _, test := range tests {
@@ -1233,6 +1229,19 @@ func TestMap2LengthMismatchPanics(t *testing.T) {
 			}()
 			test.call()
 		})
+	}
+}
+
+func TestTryMap2LengthMismatchReturnsError(t *testing.T) {
+	left := New([]int{1})
+	right := New([]int{1, 2})
+	_, err := left.TryMap2(right, func(a, b int) (int, error) { return a + b, nil })
+	if !errors.Is(err, ErrLengthMismatch) {
+		t.Fatalf("TryMap2() length error = %v, want ErrLengthMismatch", err)
+	}
+	_, err = left.TryMap2Cells(right, func(a, b Optional[int]) (Optional[int], error) { return a, nil })
+	if !errors.Is(err, ErrLengthMismatch) {
+		t.Fatalf("TryMap2Cells() length error = %v, want ErrLengthMismatch", err)
 	}
 }
 

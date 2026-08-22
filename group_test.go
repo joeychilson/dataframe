@@ -155,14 +155,15 @@ func TestGroupedOperationsPanicOnLengthMismatch(t *testing.T) {
 		{name: "FirstPresent", call: func() { grouped.FirstPresent(short) }},
 		{name: "LastPresent", call: func() { grouped.LastPresent(short) }},
 		{name: "Map", call: func() { grouped.Map(short, series.Sum[int]) }},
-		{name: "TryMap", call: func() {
-			_, _ = grouped.TryMap(short, func(series.Series[int]) (int, bool, error) { return 0, false, nil })
-		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			assertPanics(t, test.call)
 		})
+	}
+	_, err = grouped.TryMap(short, func(series.Series[int]) (int, bool, error) { return 0, false, nil })
+	if !errors.Is(err, ErrRowCount) {
+		t.Fatalf("TryMap() length error = %v, want ErrRowCount", err)
 	}
 }
 

@@ -49,6 +49,14 @@ func TestRowsAndRowGet(t *testing.T) {
 	}
 }
 
+func TestZeroRowGetReturnsError(t *testing.T) {
+	var row Row
+	value, present, err := row.Get[int]("id")
+	if value != 0 || present || !errors.Is(err, ErrInvalidRow) {
+		t.Fatalf("zero Row.Get() = (%d, %t, %v), want (0, false, ErrInvalidRow)", value, present, err)
+	}
+}
+
 func TestFromRecordsAndRecords(t *testing.T) {
 	type Metadata struct {
 		Active bool `df:"active"`

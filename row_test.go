@@ -71,7 +71,7 @@ func TestFromRecordsAndRecords(t *testing.T) {
 	}
 	a := "a"
 	input := []record{
-		{Metadata: Metadata{Active: true}, ID: 1, Name: &a, Score: series.Some(1.5), Ignored: "x"},
+		{Active: true, ID: 1, Name: &a, Score: series.Some(1.5), Ignored: "x"},
 		{ID: 2, Score: series.None[float64](), Ignored: "y"},
 	}
 

@@ -167,7 +167,7 @@ func (f Frame) Column[T any](name string) (series.Series[T], error) {
 // Errors: ErrInvalidName, ErrRowCount.
 func (f Frame) With[T any](name string, values series.Series[T]) (Frame, error) {
 	if name == "" {
-		return Frame{}, fmt.Errorf("%w", ErrInvalidName)
+		return Frame{}, ErrInvalidName
 	}
 	if f.Width() != 0 || f.Len() != 0 {
 		if values.Len() != f.Len() {
@@ -229,7 +229,7 @@ func (f Frame) Rename(from, to string) (Frame, error) {
 		return Frame{}, fmt.Errorf("%w: %q", ErrColumnNotFound, from)
 	}
 	if to == "" {
-		return Frame{}, fmt.Errorf("%w", ErrInvalidName)
+		return Frame{}, ErrInvalidName
 	}
 	if from == to {
 		return f, nil

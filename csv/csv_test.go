@@ -234,8 +234,8 @@ func TestWriteRecordsSchemaAndNulls(t *testing.T) {
 		Ignored string                  `df:"-"`
 	}
 	records := []row{
-		{Metadata: Metadata{ID: 1}, Name: series.Some("A")},
-		{Metadata: Metadata{ID: 2}},
+		{ID: 1, Name: series.Some("A")},
+		{ID: 2},
 	}
 	var output strings.Builder
 	writer := NewWriter(&output)
@@ -411,7 +411,7 @@ func TestWriterRejectsInvalidUnicodeDelimiter(t *testing.T) {
 func BenchmarkRead(b *testing.B) {
 	var input strings.Builder
 	input.WriteString("id,value\n")
-	for i := 0; i < 10_000; i++ {
+	for i := range 10_000 {
 		fmt.Fprintf(&input, "%d,%f\n", i, float64(i)/3)
 	}
 	text := input.String()

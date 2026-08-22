@@ -71,6 +71,9 @@ func TestSortedByPanicsOnInvalidKey(t *testing.T) {
 	}
 	assertPanics(t, func() { frame.SortedBy(Asc(series.New([]int{1}))) })
 	assertPanics(t, func() { frame.SortedBy(SortKey{}) })
+	single := frame.Slice(0, 1)
+	assertPanics(t, func() { single.SortedBy(Asc(series.Series[int]{})) })
+	assertPanics(t, func() { single.SortedBy(SortKey{}) })
 	assertPanics(t, func() { ByFunc(series.New([]int{1}), nil) })
 }
 

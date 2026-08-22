@@ -57,17 +57,6 @@ func (k SortKey) NullsLast() SortKey {
 // precedence. It panics when a key is the zero SortKey or its length differs
 // from f.Len().
 func (f Frame) SortedBy(keys ...SortKey) Frame {
-	if len(keys) == 0 || f.Len() < 2 {
-		for i, key := range keys {
-			if key.values == nil {
-				panic(fmt.Sprintf("dataframe: SortedBy: key %d is zero", i))
-			}
-			if key.values.len() != f.Len() {
-				panic(fmt.Sprintf("dataframe: SortedBy: key %d length mismatch: frame=%d key=%d", i, f.Len(), key.values.len()))
-			}
-		}
-		return f
-	}
 	for i, key := range keys {
 		if key.values == nil {
 			panic(fmt.Sprintf("dataframe: SortedBy: key %d is zero", i))
@@ -75,6 +64,9 @@ func (f Frame) SortedBy(keys ...SortKey) Frame {
 		if key.values.len() != f.Len() {
 			panic(fmt.Sprintf("dataframe: SortedBy: key %d length mismatch: frame=%d key=%d", i, f.Len(), key.values.len()))
 		}
+	}
+	if len(keys) == 0 || f.Len() < 2 {
+		return f
 	}
 
 	rows := make([]int, f.Len())

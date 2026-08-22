@@ -103,12 +103,20 @@ func (r *Reader) Read() (dataframe.Frame, error) {
 				continue
 			}
 			seen = true
-			_, boolOK := parseBool(text)
-			boolPossible = boolPossible && boolOK
-			_, intErr := strconv.ParseInt(text, 10, 64)
-			intPossible = intPossible && intErr == nil
-			_, floatErr := strconv.ParseFloat(text, 64)
-			floatPossible = floatPossible && floatErr == nil
+			if boolPossible {
+				_, boolPossible = parseBool(text)
+			}
+			if intPossible {
+				_, intErr := strconv.ParseInt(text, 10, 64)
+				intPossible = intErr == nil
+			}
+			if floatPossible {
+				_, floatErr := strconv.ParseFloat(text, 64)
+				floatPossible = floatErr == nil
+			}
+			if !boolPossible && !intPossible && !floatPossible {
+				break
+			}
 		}
 		if seen {
 			switch {

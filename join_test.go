@@ -455,6 +455,29 @@ func BenchmarkLeftJoin(b *testing.B) {
 	}
 }
 
+func BenchmarkSemiJoin(b *testing.B) {
+	const size = 10_000
+	keys := make([]int, size)
+	for i := range keys {
+		keys[i] = i
+	}
+	left, err := New(Column("left", keys))
+	if err != nil {
+		b.Fatal(err)
+	}
+	right, err := New(Column("right", keys))
+	if err != nil {
+		b.Fatal(err)
+	}
+	joinKey := On(series.New(keys), series.New(keys))
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := left.SemiJoin(right, joinKey); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func assertJoinColumns(t *testing.T, frame Frame, wantKeys []series.Optional[int], wantLeft, wantRight []series.Optional[string]) {
 	t.Helper()
 	keys, err := frame.Column[int]("key")

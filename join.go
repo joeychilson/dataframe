@@ -413,7 +413,12 @@ func existenceRows[K any](left, right series.Series[K], lookup joinLookup[K], ki
 	if kind != semiJoin && kind != antiJoin {
 		panic("dataframe: invalid existence join kind")
 	}
-	index := newJoinIndex(right, lookup)
+	for row := 0; row < right.Len(); row++ {
+		value, present := right.At(row)
+		if present {
+			lookup.Set(value, joinMatch{})
+		}
+	}
 	rows := make([]int, 0, left.Len())
 	for row := 0; row < left.Len(); row++ {
 		value, present := left.At(row)
@@ -423,7 +428,7 @@ func existenceRows[K any](left, right series.Series[K], lookup joinLookup[K], ki
 			}
 			continue
 		}
-		_, found := index.lookup.Get(value)
+		_, found := lookup.Get(value)
 		if (kind == semiJoin && found) || (kind == antiJoin && !found) {
 			rows = append(rows, row)
 		}

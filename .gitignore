@@ -1,0 +1,43 @@
+# Build output
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+
+# Tests, coverage, and profiling
+*.out
+*.coverprofile
+*.prof
+*.pprof
+*.trace
+/coverage/
+
+# Local Go workspaces
+go.work
+go.work.sum
+
+# Local environment and logs
+.env
+.env.*
+!.env.example
+*.log
+
+# Tool caches and temporary files
+/.cache/
+/.tmp/
+/tmp/
+
+# Editors
+/.idea/
+/.vscode/
+*.swp
+*.swo
+*~
+
+# Operating systems
+.DS_Store
+Thumbs.db

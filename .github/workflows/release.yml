@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Validate tag and module
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "${tag}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$ ]]; then
+            echo "invalid release tag: ${tag}" >&2
+            exit 1
+          fi
+
+          if [[ "${tag}" == *-* ]]; then
+            IFS='.' read -ra identifiers <<< "${tag#*-}"
+            for identifier in "${identifiers[@]}"; do
+              if [[ "${identifier}" =~ ^0[0-9]+$ ]]; then
+                echo "invalid numeric prerelease identifier in tag: ${tag}" >&2
+                exit 1
+              fi
+            done
+          fi
+
+          major="${tag%%.*}"
+          module="$(go list -m -f '{{.Path}}')"
+          module_base="${module##*/}"
+          if [[ ( "${major}" == "v0" || "${major}" == "v1" ) && "${module_base}" =~ ^v([2-9]|[1-9][0-9]+)$ ]]; then
+            echo "tag ${tag} is incompatible with versioned module path: ${module}" >&2
+            exit 1
+          fi
+          if [[ "${major}" != "v0" && "${major}" != "v1" && "${module_base}" != "${major}" ]]; then
+            echo "tag ${tag} requires module path ending in /${major}: ${module}" >&2
+            exit 1
+          fi
+      - name: Check modules
+        run: |
+          go mod tidy -diff
+          go mod verify
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13
+      - name: Test
+        run: go test -race -shuffle=on ./...
+      - name: Build
+        run: go build ./...
+      - uses: golang/govulncheck-action@v1
+        with:
+          go-version-input: "1.27"
+          cache-dependency-path: go.mod
+          go-package: ./...
+
+  release:
+    name: Publish
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Create GitHub release
+        shell: bash
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=()
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "${GITHUB_REF_NAME}" \
+            --verify-tag \
+            --generate-notes \
+            --title "${GITHUB_REF_NAME}" \
+            "${flags[@]}"

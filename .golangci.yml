@@ -1,0 +1,118 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - asciicheck
+    - asasalint
+    - bidichk
+    - bodyclose
+    - canonicalheader
+    - containedctx
+    - contextcheck
+    - copyloopvar
+    - dupword
+    - durationcheck
+    - errcheck
+    - errchkjson
+    - errname
+    - errorlint
+    - exhaustive
+    - exptostd
+    - fatcontext
+    - gocheckcompilerdirectives
+    - gochecknoinits
+    - gochecksumtype
+    - godoclint
+    - gomoddirectives
+    - goprintffuncname
+    - govet
+    - iface
+    - ineffassign
+    - intrange
+    - iotamixing
+    - loggercheck
+    - makezero
+    - mirror
+    - misspell
+    - modernize
+    - nakedret
+    - nilnil
+    - nilerr
+    - nilnesserr
+    - noctx
+    - nolintlint
+    - nosprintfhostport
+    - perfsprint
+    - reassign
+    - rowserrcheck
+    - sqlclosecheck
+    - staticcheck
+    - testableexamples
+    - thelper
+    - tparallel
+    - unconvert
+    - unparam
+    - unused
+    - usestdlibvars
+    - usetesting
+    - wastedassign
+  settings:
+    copyloopvar:
+      check-alias: true
+    exhaustive:
+      default-signifies-exhaustive: true
+      ignore-enum-types: ^reflect\.Kind$
+    gochecksumtype:
+      default-signifies-exhaustive: true
+    godoclint:
+      default: none
+      enable:
+        - deprecated
+        - pkg-doc
+        - require-doc
+        - require-pkg-doc
+        - single-pkg-doc
+        - start-with-name
+    govet:
+      enable:
+        - shadow
+    iface:
+      enable:
+        - identical
+        - unexported
+    modernize:
+      disable:
+        - omitzero
+        - stditerators
+        - stringsbuilder
+    nakedret:
+      max-func-lines: 0
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+  exclusions:
+    generated: strict
+    warn-unused: true
+    rules:
+      - path: _test\.go
+        linters:
+          - godoclint
+
+formatters:
+  enable:
+    - gofmt
+  exclusions:
+    generated: strict
+    warn-unused: true
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+run:
+  timeout: 5m
+  relative-path-mode: gomod
+  modules-download-mode: readonly
+  tests: true

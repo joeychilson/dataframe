@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"hash/maphash"
 	"math"
-	"slices"
 
 	"github.com/joeychilson/dataframe/internal/hashmap"
 	"github.com/joeychilson/dataframe/series"
@@ -350,13 +349,9 @@ func resolveJoinPlan[K any](left, right Frame, key JoinKey[K]) (resolvedJoinPlan
 	plan.left = leftKey
 	plan.right = rightKey
 	plan.projection = joinProjection{
-		leftKeyIndex: slices.IndexFunc(left.columns, func(column column) bool {
-			return column.name == key.leftName
-		}),
-		rightKeyIndex: slices.IndexFunc(right.columns, func(column column) bool {
-			return column.name == key.rightName
-		}),
-		outputName: key.outputName,
+		leftKeyIndex:  left.columnIndex(key.leftName),
+		rightKeyIndex: right.columnIndex(key.rightName),
+		outputName:    key.outputName,
 	}
 	return plan, nil
 }

@@ -157,9 +157,7 @@ func (f Frame) Schema() []Field {
 
 // Has reports whether name exists.
 func (f Frame) Has(name string) bool {
-	return slices.IndexFunc(f.columns, func(column column) bool {
-		return column.name == name
-	}) >= 0
+	return f.columnIndex(name) >= 0
 }
 
 // String returns a compact debugging preview. It implements fmt.Stringer; its
@@ -184,9 +182,7 @@ func (f Frame) String() string {
 //
 // Errors: ErrColumnNotFound, ErrColumnType.
 func (f Frame) Column[T any](name string) (series.Series[T], error) {
-	index := slices.IndexFunc(f.columns, func(column column) bool {
-		return column.name == name
-	})
+	index := f.columnIndex(name)
 	if index < 0 {
 		return series.Series[T]{}, fmt.Errorf("%w: %q", ErrColumnNotFound, name)
 	}
@@ -213,9 +209,7 @@ func (f Frame) With[T any](name string, values series.Series[T]) (Frame, error) 
 
 	newColumn := typedColumn(name, values)
 	columns := slices.Clone(f.columns)
-	if index := slices.IndexFunc(f.columns, func(candidate column) bool {
-		return candidate.name == name
-	}); index >= 0 {
+	if index := f.columnIndex(name); index >= 0 {
 		columns[index] = newColumn
 	} else {
 		columns = append(columns, newColumn)
@@ -262,9 +256,7 @@ func (f Frame) Drop(names ...string) (Frame, error) {
 //
 // Errors: ErrColumnNotFound, ErrInvalidName, ErrColumnConflict.
 func (f Frame) Rename(from, to string) (Frame, error) {
-	index := slices.IndexFunc(f.columns, func(column column) bool {
-		return column.name == from
-	})
+	index := f.columnIndex(from)
 	if index < 0 {
 		return Frame{}, fmt.Errorf("%w: %q", ErrColumnNotFound, from)
 	}
@@ -293,9 +285,7 @@ func (f Frame) Select(names ...string) (Frame, error) {
 		if _, exists := selected[name]; exists {
 			return Frame{}, fmt.Errorf("%w: %q selected more than once", ErrColumnConflict, name)
 		}
-		index := slices.IndexFunc(f.columns, func(column column) bool {
-			return column.name == name
-		})
+		index := f.columnIndex(name)
 		if index < 0 {
 			return Frame{}, fmt.Errorf("%w: %q", ErrColumnNotFound, name)
 		}
@@ -433,4 +423,10 @@ func (f Frame) Concat(others ...Frame) (Frame, error) {
 		columns[columnIndex] = base
 	}
 	return Frame{columns: columns, rowCount: total}, nil
+}
+
+func (f Frame) columnIndex(name string) int {
+	return slices.IndexFunc(f.columns, func(column column) bool {
+		return column.name == name
+	})
 }

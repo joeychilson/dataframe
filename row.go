@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"iter"
 	"reflect"
-	"slices"
 
 	"github.com/joeychilson/dataframe/internal/record"
 )
@@ -42,9 +41,7 @@ func (r Row) Get[T any](name string) (value T, present bool, err error) {
 	if r.frame == nil {
 		return value, false, fmt.Errorf("%w: zero value", ErrInvalidRow)
 	}
-	index := slices.IndexFunc(r.frame.columns, func(stored column) bool {
-		return stored.name == name
-	})
+	index := r.frame.columnIndex(name)
 	if index < 0 {
 		return value, false, fmt.Errorf("%w: %q", ErrColumnNotFound, name)
 	}
@@ -116,9 +113,7 @@ func (f Frame) Records[T any]() ([]T, error) {
 	}
 	columns := make([]column, len(fields))
 	for i, field := range fields {
-		index := slices.IndexFunc(f.columns, func(column column) bool {
-			return column.name == field.Name
-		})
+		index := f.columnIndex(field.Name)
 		if index < 0 {
 			return nil, fmt.Errorf("%w: %q", ErrColumnNotFound, field.Name)
 		}

@@ -244,9 +244,7 @@ func (f Frame) Drop(names ...string) (Frame, error) {
 	}
 	drop := make(map[string]struct{}, len(names))
 	for _, name := range names {
-		if slices.IndexFunc(f.columns, func(column column) bool {
-			return column.name == name
-		}) < 0 {
+		if !f.Has(name) {
 			return Frame{}, fmt.Errorf("%w: %q", ErrColumnNotFound, name)
 		}
 		drop[name] = struct{}{}

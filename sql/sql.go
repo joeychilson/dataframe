@@ -137,7 +137,6 @@ func (r *Reader) ReadRecords[T any]() (records []T, err error) {
 	}
 	columnFields := make([]record.Field, len(names))
 	mapped := make([]bool, len(names))
-	seenFields := make(map[string]struct{}, len(fields))
 	for i, name := range names {
 		field, ok := fieldByName[name]
 		if !ok {
@@ -145,10 +144,10 @@ func (r *Reader) ReadRecords[T any]() (records []T, err error) {
 		}
 		columnFields[i] = field
 		mapped[i] = true
-		seenFields[name] = struct{}{}
+		delete(fieldByName, name)
 	}
 	for _, field := range fields {
-		if _, ok := seenFields[field.Name]; !ok {
+		if _, missing := fieldByName[field.Name]; missing {
 			return nil, fmt.Errorf("%w: %q", dataframe.ErrColumnNotFound, field.Name)
 		}
 	}

@@ -387,6 +387,10 @@ func TestQueryRecordsUsesDatabaseSQLScanning(t *testing.T) {
 			scanTypes: []reflect.Type{reflect.TypeFor[int64](), reflect.TypeFor[string](), reflect.TypeFor[float64](), reflect.TypeFor[string](), reflect.TypeFor[string]()},
 			rows:      [][]driver.Value{{nil, "A", 1.5, "C7", nil}},
 		},
+		"missing-fields": {
+			names:     []string{"id", "name", "ignored"},
+			scanTypes: []reflect.Type{reflect.TypeFor[int64](), reflect.TypeFor[string](), reflect.TypeFor[string]()},
+		},
 	})
 	t.Cleanup(func() {
 		if closeErr := db.Close(); closeErr != nil {
@@ -403,6 +407,9 @@ func TestQueryRecordsUsesDatabaseSQLScanning(t *testing.T) {
 	}
 	if _, queryErr := QueryRecords[result](context.Background(), db, "bad-null"); !errors.Is(queryErr, dataframe.ErrInvalidRecord) {
 		t.Fatalf("non-null field error = %v", queryErr)
+	}
+	if _, queryErr := QueryRecords[result](context.Background(), db, "missing-fields"); !errors.Is(queryErr, dataframe.ErrColumnNotFound) || !strings.Contains(queryErr.Error(), `"score"`) {
+		t.Fatalf("missing field error = %v", queryErr)
 	}
 }
 

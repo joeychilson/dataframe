@@ -170,11 +170,7 @@ func (s Series[T]) ValueOr(i int, fallback T) T {
 
 // FirstPresent returns the first non-null value and whether one exists.
 func (s Series[T]) FirstPresent() (T, bool) {
-	var zero T
-	if len(s.values) == 0 {
-		return zero, false
-	}
-	if !s.validity.Initialized() {
+	if !s.validity.Initialized() && len(s.values) > 0 {
 		return s.values[0], true
 	}
 	for i := range s.values {
@@ -182,16 +178,13 @@ func (s Series[T]) FirstPresent() (T, bool) {
 			return s.values[i], true
 		}
 	}
+	var zero T
 	return zero, false
 }
 
 // LastPresent returns the last non-null value and whether one exists.
 func (s Series[T]) LastPresent() (T, bool) {
-	var zero T
-	if len(s.values) == 0 {
-		return zero, false
-	}
-	if !s.validity.Initialized() {
+	if !s.validity.Initialized() && len(s.values) > 0 {
 		return s.values[len(s.values)-1], true
 	}
 	for i, value := range slices.Backward(s.values) {
@@ -199,6 +192,7 @@ func (s Series[T]) LastPresent() (T, bool) {
 			return value, true
 		}
 	}
+	var zero T
 	return zero, false
 }
 

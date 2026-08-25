@@ -1660,6 +1660,64 @@ func BenchmarkMap(b *testing.B) {
 	}
 }
 
+func BenchmarkCellTransforms(b *testing.B) {
+	const length = 1 << 16
+	physical := make([]int, length)
+	validity := make([]bool, length)
+	for i := range physical {
+		physical[i] = i
+		validity[i] = i%4 != 0
+	}
+	partiallyNull, err := NewNullable(physical, validity)
+	if err != nil {
+		b.Fatal(err)
+	}
+	inputs := []struct {
+		name   string
+		values Series[int]
+	}{
+		{name: "NonNull", values: New(physical)},
+		{name: "PartiallyNull", values: partiallyNull},
+	}
+	for _, input := range inputs {
+		b.Run("All/"+input.name, func(b *testing.B) {
+			b.ReportAllocs()
+			total := 0
+			for b.Loop() {
+				for _, cell := range input.values.All() {
+					if cell.Valid {
+						total += cell.Value
+					}
+				}
+			}
+			runtime.KeepAlive(total)
+		})
+		b.Run("MapCells/"+input.name, func(b *testing.B) {
+			b.ReportAllocs()
+			var result Series[int]
+			for b.Loop() {
+				result = input.values.MapCells(func(cell Optional[int]) Optional[int] {
+					return cell
+				})
+			}
+			runtime.KeepAlive(result)
+		})
+		b.Run("Map2Cells/"+input.name, func(b *testing.B) {
+			b.ReportAllocs()
+			var result Series[int]
+			for b.Loop() {
+				result = input.values.Map2Cells(input.values, func(left, right Optional[int]) Optional[int] {
+					if !left.Valid || !right.Valid {
+						return None[int]()
+					}
+					return Some(left.Value + right.Value)
+				})
+			}
+			runtime.KeepAlive(result)
+		})
+	}
+}
+
 func BenchmarkSortedFunc(b *testing.B) {
 	const length = 1 << 14
 	sortedValues := make([]int, length)

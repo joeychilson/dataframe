@@ -91,10 +91,7 @@ func NewNullableFunc[T any](n int, value func(int) (T, bool)) Series[T] {
 	result := Series[T]{values: make([]T, n), validity: bitmap.New(n)}
 	for i := range result.values {
 		cell, present := value(i)
-		if present {
-			result.values[i] = cell
-			result.validity.Set(i, true)
-		}
+		result.setOptional(i, Optional[T]{Value: cell, Valid: present})
 	}
 	return result
 }
@@ -102,15 +99,11 @@ func NewNullableFunc[T any](n int, value func(int) (T, bool)) Series[T] {
 // FromOptionals returns a nullable Series containing the supplied optional
 // cells. The result remains nullable when values is empty or contains no nulls.
 func FromOptionals[T any](values []Optional[T]) Series[T] {
-	physical := make([]T, len(values))
-	validity := bitmap.New(len(values))
+	result := Series[T]{values: make([]T, len(values)), validity: bitmap.New(len(values))}
 	for i, value := range values {
-		if value.Valid {
-			physical[i] = value.Value
-			validity.Set(i, true)
-		}
+		result.setOptional(i, value)
 	}
-	return Series[T]{values: physical, validity: validity}
+	return result
 }
 
 // Repeat returns a non-null Series containing n copies of value. It panics
@@ -218,9 +211,7 @@ func (s Series[T]) Validity() []bool {
 func (s Series[T]) Optionals() []Optional[T] {
 	values := make([]Optional[T], len(s.values))
 	for i, value := range s.values {
-		if !s.validity.Initialized() || s.validity.At(i) {
-			values[i] = Some(value)
-		}
+		values[i] = s.optionalAt(i, value)
 	}
 	return values
 }
@@ -229,11 +220,7 @@ func (s Series[T]) Optionals() []Optional[T] {
 func (s Series[T]) All() iter.Seq2[int, Optional[T]] {
 	return func(yield func(int, Optional[T]) bool) {
 		for i, value := range s.values {
-			cell := Optional[T]{}
-			if !s.validity.Initialized() || s.validity.At(i) {
-				cell = Some(value)
-			}
-			if !yield(i, cell) {
+			if !yield(i, s.optionalAt(i, value)) {
 				return
 			}
 		}
@@ -362,15 +349,7 @@ func (s Series[T]) MapCells[U any](fn func(Optional[T]) Optional[U]) Series[U] {
 		validity: bitmap.New(s.Len()),
 	}
 	for i, value := range s.values {
-		cell := Optional[T]{}
-		if !s.validity.Initialized() || s.validity.At(i) {
-			cell = Some(value)
-		}
-		mapped := fn(cell)
-		if mapped.Valid {
-			result.values[i] = mapped.Value
-			result.validity.Set(i, true)
-		}
+		result.setOptional(i, fn(s.optionalAt(i, value)))
 	}
 	return result
 }
@@ -389,10 +368,7 @@ func (s Series[T]) MapOptional[U any](fn func(T) (U, bool)) Series[U] {
 	}
 	for i, value := range s.Present() {
 		mapped, valid := fn(value)
-		if valid {
-			result.values[i] = mapped
-			result.validity.Set(i, true)
-		}
+		result.setOptional(i, Optional[U]{Value: mapped, Valid: valid})
 	}
 	return result
 }
@@ -428,18 +404,11 @@ func (s Series[T]) TryMapCells[U any](fn func(Optional[T]) (Optional[U], error))
 		validity: bitmap.New(s.Len()),
 	}
 	for i, value := range s.values {
-		cell := Optional[T]{}
-		if !s.validity.Initialized() || s.validity.At(i) {
-			cell = Some(value)
-		}
-		mapped, err := fn(cell)
+		mapped, err := fn(s.optionalAt(i, value))
 		if err != nil {
 			return Series[U]{}, fmt.Errorf("series: try map cells: row %d: %w", i, err)
 		}
-		if mapped.Valid {
-			result.values[i] = mapped.Value
-			result.validity.Set(i, true)
-		}
+		result.setOptional(i, mapped)
 	}
 	return result, nil
 }
@@ -484,19 +453,7 @@ func (s Series[T]) Map2Cells[U, V any](other Series[U], fn func(Optional[T], Opt
 		validity: bitmap.New(s.Len()),
 	}
 	for i, value := range s.values {
-		left := Optional[T]{}
-		if !s.validity.Initialized() || s.validity.At(i) {
-			left = Some(value)
-		}
-		right := Optional[U]{}
-		if !other.validity.Initialized() || other.validity.At(i) {
-			right = Some(other.values[i])
-		}
-		mapped := fn(left, right)
-		if mapped.Valid {
-			result.values[i] = mapped.Value
-			result.validity.Set(i, true)
-		}
+		result.setOptional(i, fn(s.optionalAt(i, value), other.optionalAt(i, other.values[i])))
 	}
 	return result
 }
@@ -543,22 +500,11 @@ func (s Series[T]) TryMap2Cells[U, V any](other Series[U], fn func(Optional[T], 
 		validity: bitmap.New(s.Len()),
 	}
 	for i, value := range s.values {
-		left := Optional[T]{}
-		if !s.validity.Initialized() || s.validity.At(i) {
-			left = Some(value)
-		}
-		right := Optional[U]{}
-		if !other.validity.Initialized() || other.validity.At(i) {
-			right = Some(other.values[i])
-		}
-		mapped, err := fn(left, right)
+		mapped, err := fn(s.optionalAt(i, value), other.optionalAt(i, other.values[i]))
 		if err != nil {
 			return Series[V]{}, fmt.Errorf("series: try map 2 cells: row %d: %w", i, err)
 		}
-		if mapped.Valid {
-			result.values[i] = mapped.Value
-			result.validity.Set(i, true)
-		}
+		result.setOptional(i, mapped)
 	}
 	return result, nil
 }
@@ -816,6 +762,23 @@ func (s Series[T]) DropNull() Series[T] {
 		values = append(values, value)
 	}
 	return Series[T]{values: values}
+}
+
+// setOptional writes into a newly allocated Series with initialized validity.
+func (s *Series[T]) setOptional(i int, cell Optional[T]) {
+	if cell.Valid {
+		s.values[i] = cell.Value
+		s.validity.Set(i, true)
+	}
+}
+
+// optionalAt accepts the caller's already-loaded physical value so cell
+// transforms retain their range-loop performance while pairing it with validity.
+func (s *Series[T]) optionalAt(i int, value T) Optional[T] {
+	if s.validity.Initialized() && !s.validity.At(i) {
+		return Optional[T]{}
+	}
+	return Optional[T]{Value: value, Valid: true}
 }
 
 func combinedValidity(left, right bitmap.Bitmap) bitmap.Bitmap {

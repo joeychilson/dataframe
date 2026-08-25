@@ -74,11 +74,9 @@ func (f Frame) GroupByUsing[K any](key series.Series[K], hasher maphash.Hasher[K
 			grouped.rowGroups[row] = nullIndex
 			continue
 		}
-		index, found := indexes.Get(value)
-		if !found {
-			index = groupCount
+		index, loaded := indexes.LoadOrStore(value, groupCount)
+		if !loaded {
 			groupCount++
-			indexes.Set(value, index)
 		}
 		grouped.rowGroups[row] = index
 	}

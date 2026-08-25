@@ -24,8 +24,8 @@ func (f Frame) Distinct() (Frame, error) {
 		if !stored.typeOf.Comparable() {
 			return Frame{}, fmt.Errorf("%w: column %q has type %v", ErrUnsupported, stored.name, stored.typeOf)
 		}
-		if rows, ok := distinctBuiltinRows(stored); ok {
-			return f.Take(rows), nil
+		if values, ok := newDistinctColumn(stored); ok {
+			return f.Take(values.rows()), nil
 		}
 
 		seen := make(map[any]struct{}, f.Len())
@@ -149,14 +149,6 @@ type typedDistinctColumn[T comparable] struct {
 
 type distinctRowHasher struct {
 	columns []distinctColumn
-}
-
-func distinctBuiltinRows(column column) ([]int, bool) {
-	values, ok := newDistinctColumn(column)
-	if !ok {
-		return nil, false
-	}
-	return values.rows(), true
 }
 
 func distinctBuiltinFrameRows(columns []column, length int) ([]int, bool) {

@@ -3,15 +3,111 @@ package dataframe
 import (
 	"errors"
 	"math"
+	"os"
 	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/joeychilson/dataframe/mask"
 	"github.com/joeychilson/dataframe/series"
 )
+
+func TestFramePrint_WritesAlignedTable(t *testing.T) {
+	notes, err := series.NewNullable(
+		[]string{"one\tline", "", "three\nlines"},
+		[]bool{true, false, true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, err := New(
+		Column("id", []int{1, 20, 300}),
+		ColumnFromSeries("note\ntext", notes),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var output strings.Builder
+	if err := frame.Print(&output); err != nil {
+		t.Fatal(err)
+	}
+	const want = "id   note\\ntext\n1    one\\tline\n20   <null>\n300  three\\nlines\n"
+	if got := output.String(); got != want {
+		t.Fatalf("Print output = %q, want %q", got, want)
+	}
+}
+
+func TestFramePrint_HandlesEmptyShapes(t *testing.T) {
+	headerOnly, err := New(Column("id", []int{}), Column("name", []string{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeroWidth := Frame{rowCount: 2}
+
+	for _, test := range []struct {
+		name  string
+		frame Frame
+		want  string
+	}{
+		{name: "header only", frame: headerOnly, want: "id  name\n"},
+		{name: "zero frame", frame: Frame{}, want: "Frame[0x0]{}\n"},
+		{name: "zero width", frame: zeroWidth, want: "Frame[2x0]{}\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var output strings.Builder
+			if err := test.frame.Print(&output); err != nil {
+				t.Fatal(err)
+			}
+			if got := output.String(); got != test.want {
+				t.Fatalf("Print output = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestFramePrint_ReturnsWriterErrors(t *testing.T) {
+	want := errors.New("write failed")
+	frame, err := New(Column("id", []int{1}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if printErr := frame.Print(frameErrorWriter{err: want}); !errors.Is(printErr, want) {
+		t.Fatalf("Print error = %v, want %v", printErr, want)
+	}
+	if printErr := frame.Print(nil); printErr == nil {
+		t.Fatal("Print(nil) did not fail")
+	}
+}
+
+func ExampleFrame_Print() {
+	frame, err := New(
+		Column("id", []int{1, 2}),
+		Column("name", []string{"Ada", "Linus"}),
+	)
+	if err != nil {
+		panic(err)
+	}
+	if err := frame.Print(os.Stdout); err != nil {
+		panic(err)
+	}
+
+	// Output:
+	// id  name
+	// 1   Ada
+	// 2   Linus
+}
+
+type frameErrorWriter struct {
+	err error
+}
+
+func (w frameErrorWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
 
 func TestColumnCopiesInput(t *testing.T) {
 	values := []int{1, 2}

@@ -17,10 +17,12 @@ package dataframe
 import (
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"reflect"
 	"slices"
 	"strings"
+	"text/tabwriter"
 
 	"github.com/joeychilson/dataframe/internal/record"
 	"github.com/joeychilson/dataframe/mask"
@@ -176,6 +178,72 @@ func (f Frame) String() string {
 	}
 	result.WriteByte('}')
 	return result.String()
+}
+
+// Print writes f to output as a tab-aligned table with column names on the
+// first line. Null cells are written as <null>, and tabs and line breaks within
+// names or cells are escaped. A zero-width Frame is written using [Frame.String].
+// A nil output returns an error.
+func (f Frame) Print(output io.Writer) error {
+	if output == nil {
+		return errors.New("dataframe: Print: nil writer")
+	}
+
+	writer := tabwriter.NewWriter(output, 0, 4, 2, ' ', 0)
+	write := func(text string) error {
+		_, err := io.WriteString(writer, text)
+		return err
+	}
+	if f.Width() == 0 {
+		if err := write(f.String() + "\n"); err != nil {
+			return fmt.Errorf("dataframe: Print: %w", err)
+		}
+		if err := writer.Flush(); err != nil {
+			return fmt.Errorf("dataframe: Print: %w", err)
+		}
+		return nil
+	}
+
+	escaper := strings.NewReplacer("\t", `\t`, "\r", `\r`, "\n", `\n`)
+	for columnIndex, column := range f.columns {
+		if columnIndex > 0 {
+			if err := write("\t"); err != nil {
+				return fmt.Errorf("dataframe: Print: %w", err)
+			}
+		}
+		if err := write(escaper.Replace(column.name)); err != nil {
+			return fmt.Errorf("dataframe: Print: %w", err)
+		}
+	}
+	if err := write("\n"); err != nil {
+		return fmt.Errorf("dataframe: Print: %w", err)
+	}
+
+	for row := range f.Len() {
+		for columnIndex, column := range f.columns {
+			if columnIndex > 0 {
+				if err := write("\t"); err != nil {
+					return fmt.Errorf("dataframe: Print: %w", err)
+				}
+			}
+			value, present := column.values.at(row)
+			text := "<null>"
+			if present {
+				text = fmt.Sprint(value)
+			}
+			if err := write(escaper.Replace(text)); err != nil {
+				return fmt.Errorf("dataframe: Print: %w", err)
+			}
+		}
+		if err := write("\n"); err != nil {
+			return fmt.Errorf("dataframe: Print: %w", err)
+		}
+	}
+
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("dataframe: Print: %w", err)
+	}
+	return nil
 }
 
 // Column returns name as a Series with the exact requested Go element type.

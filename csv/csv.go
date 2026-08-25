@@ -369,8 +369,7 @@ func (w *Writer) Write(f dataframe.Frame) error {
 // encoding.TextMarshaler control their text form, with TextAppender preferred.
 // A nil Writer or underlying output returns an error.
 func (w *Writer) WriteRecords[T any](records []T) error {
-	typeOf := reflect.TypeFor[T]()
-	fields, err := record.Describe(typeOf)
+	fields, err := record.Describe(reflect.TypeFor[T]())
 	if err != nil {
 		return err
 	}

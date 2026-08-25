@@ -450,9 +450,6 @@ func (b Bitmap) word(i int) uint64 {
 }
 
 func requiresBackwardCopy(destination Bitmap, start int, source Bitmap) bool {
-	if source.length == 0 {
-		return false
-	}
 	destinationStart := destination.offset + start
 	destinationWord := &destination.words[destinationStart/bitsPerWord]
 	for i := range source.words {

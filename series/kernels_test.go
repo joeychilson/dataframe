@@ -524,10 +524,16 @@ func BenchmarkAdd(b *testing.B) {
 
 func BenchmarkAggregates(b *testing.B) {
 	values := make([]float64, 1<<14)
+	validity := make([]bool, len(values))
 	for i := range values {
 		values[i] = float64(i % 1000)
+		validity[i] = i%4 != 0
 	}
 	source := New(values)
+	nullable, err := NewNullable(values, validity)
+	if err != nil {
+		b.Fatal(err)
+	}
 	operations := []struct {
 		name      string
 		aggregate func(Series[float64]) (float64, bool)
@@ -547,6 +553,32 @@ func BenchmarkAggregates(b *testing.B) {
 			}
 			runtime.KeepAlive(result)
 		})
+	}
+
+	extrema := []struct {
+		name      string
+		aggregate func(Series[float64]) (int, bool)
+	}{
+		{name: "arg-min", aggregate: ArgMin[float64]},
+		{name: "arg-max", aggregate: ArgMax[float64]},
+	}
+	for _, input := range []struct {
+		name   string
+		values Series[float64]
+	}{
+		{name: "non-null", values: source},
+		{name: "25%-null", values: nullable},
+	} {
+		for _, operation := range extrema {
+			b.Run(operation.name+"/"+input.name, func(b *testing.B) {
+				b.ReportAllocs()
+				var result int
+				for b.Loop() {
+					result, _ = operation.aggregate(input.values)
+				}
+				runtime.KeepAlive(result)
+			})
+		}
 	}
 }
 

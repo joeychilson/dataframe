@@ -278,40 +278,14 @@ func Max[T cmp.Ordered](s Series[T]) (T, bool) {
 // any value is present. If a present value is NaN, it returns the first NaN
 // row.
 func ArgMin[T cmp.Ordered](s Series[T]) (int, bool) {
-	index := 0
-	var minimum T
-	found := false
-	for i, value := range s.values {
-		if s.validity.Initialized() && !s.validity.At(i) {
-			continue
-		}
-		if !found || (value != value && minimum == minimum) || (minimum == minimum && value < minimum) {
-			index = i
-			minimum = value
-			found = true
-		}
-	}
-	return index, found
+	return argExtreme(s, false)
 }
 
 // ArgMax returns the row index of the first maximum present value and whether
 // any value is present. If a present value is NaN, it returns the first NaN
 // row.
 func ArgMax[T cmp.Ordered](s Series[T]) (int, bool) {
-	index := 0
-	var maximum T
-	found := false
-	for i, value := range s.values {
-		if s.validity.Initialized() && !s.validity.At(i) {
-			continue
-		}
-		if !found || (value != value && maximum == maximum) || (maximum == maximum && value > maximum) {
-			index = i
-			maximum = value
-			found = true
-		}
-	}
-	return index, found
+	return argExtreme(s, true)
 }
 
 // SampleVariance returns sample variance and whether at least two values are
@@ -402,6 +376,27 @@ func Sorted[T cmp.Ordered](s Series[T]) Series[T] {
 // SortedDescending returns a stable descending ordering with nulls last.
 func SortedDescending[T cmp.Ordered](s Series[T]) Series[T] {
 	return s.SortedFunc(func(left, right T) int { return cmp.Compare(right, left) })
+}
+
+// argExtreme treats the first NaN as both extrema and preserves first ties.
+func argExtreme[T cmp.Ordered](s Series[T], maximum bool) (int, bool) {
+	index := 0
+	var extreme T
+	found := false
+	for i, value := range s.Present() {
+		var better bool
+		if maximum {
+			better = value > extreme
+		} else {
+			better = value < extreme
+		}
+		if !found || (extreme == extreme && (value != value || better)) {
+			index = i
+			extreme = value
+			found = true
+		}
+	}
+	return index, found
 }
 
 func scaledSampleVariance[T Real](s Series[T], count int) float64 {

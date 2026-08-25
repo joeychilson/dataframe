@@ -205,7 +205,6 @@ func (w *Writer) Write(ctx context.Context, frame dataframe.Frame) error {
 	if w == nil || w.statement == nil {
 		return errors.New("dataframe/sql: nil statement")
 	}
-	statement := w.statement
 	if frame.Width() == 0 && frame.Len() > 0 {
 		return fmt.Errorf("%w: cannot execute %d rows without columns", dataframe.ErrUnsupported, frame.Len())
 	}
@@ -220,7 +219,7 @@ func (w *Writer) Write(ctx context.Context, frame dataframe.Frame) error {
 			}
 			arguments[i] = statementArgument(reflect.ValueOf(value))
 		}
-		if _, execErr := statement.ExecContext(ctx, arguments...); execErr != nil {
+		if _, execErr := w.statement.ExecContext(ctx, arguments...); execErr != nil {
 			return fmt.Errorf("dataframe/sql: row %d: %w", row, execErr)
 		}
 	}
@@ -236,7 +235,6 @@ func (w *Writer) WriteRecords[T any](ctx context.Context, records []T) error {
 	if w == nil || w.statement == nil {
 		return errors.New("dataframe/sql: nil statement")
 	}
-	statement := w.statement
 	fields, err := record.Describe(reflect.TypeFor[T]())
 	if err != nil {
 		return err
@@ -257,7 +255,7 @@ func (w *Writer) WriteRecords[T any](ctx context.Context, records []T) error {
 			}
 			arguments[i] = statementArgument(fieldValue)
 		}
-		if _, execErr := statement.ExecContext(ctx, arguments...); execErr != nil {
+		if _, execErr := w.statement.ExecContext(ctx, arguments...); execErr != nil {
 			return fmt.Errorf("dataframe/sql: row %d: %w", row, execErr)
 		}
 	}

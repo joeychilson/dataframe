@@ -296,17 +296,13 @@ func joinFrames[K any](left, right Frame, key JoinKey[K], kind joinKind) (Frame,
 	var leftRows, rightRows []int
 	switch kind {
 	case innerJoin, leftJoin:
-		lookup := plan.newLookup(plan.right.Len())
-		leftRows, rightRows, err = pairedMatchingRows(plan.left, plan.right, lookup, kind == leftJoin)
+		leftRows, rightRows, err = pairedMatchingRows(plan.left, plan.right, plan.newLookup(plan.right.Len()), kind == leftJoin)
 	case rightJoin:
-		lookup := plan.newLookup(plan.left.Len())
-		rightRows, leftRows, err = pairedMatchingRows(plan.right, plan.left, lookup, true)
+		rightRows, leftRows, err = pairedMatchingRows(plan.right, plan.left, plan.newLookup(plan.left.Len()), true)
 	case fullJoin:
-		lookup := plan.newLookup(plan.right.Len())
-		leftRows, rightRows, err = fullMatchingRows(plan.left, plan.right, lookup)
+		leftRows, rightRows, err = fullMatchingRows(plan.left, plan.right, plan.newLookup(plan.right.Len()))
 	case semiJoin, antiJoin:
-		lookup := plan.newLookup(plan.right.Len())
-		return left.Take(existenceRows(plan.left, plan.right, lookup, kind == semiJoin)), nil
+		return left.Take(existenceRows(plan.left, plan.right, plan.newLookup(plan.right.Len()), kind == semiJoin)), nil
 	default:
 		panic("dataframe: invalid join kind")
 	}

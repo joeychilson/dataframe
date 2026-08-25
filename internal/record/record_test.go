@@ -97,6 +97,26 @@ func TestDescribe_RejectsInvalidAndDuplicateFields(t *testing.T) {
 	if _, err := Describe(reflect.TypeFor[*struct{}]()); !errors.Is(err, ErrInvalidRecord) {
 		t.Fatalf("invalid type error = %v", err)
 	}
+	type hidden struct {
+		ID int
+	}
+	type embedsHidden struct {
+		hidden
+	}
+	if _, err := Describe(reflect.TypeFor[embedsHidden]()); !errors.Is(err, ErrInvalidRecord) {
+		t.Fatalf("unexported anonymous field error = %v", err)
+	}
+	type ignoresHidden struct {
+		hidden `df:"-"`
+		Name   string
+	}
+	fields, err := Describe(reflect.TypeFor[ignoresHidden]())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fields) != 1 || fields[0].Name != "Name" {
+		t.Fatalf("fields after ignored anonymous field = %#v", fields)
+	}
 	type duplicate struct {
 		Left  int `df:"value"`
 		Right int `df:"value"`

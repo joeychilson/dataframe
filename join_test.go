@@ -439,6 +439,20 @@ func TestCrossJoin_ProducesCartesianProduct(t *testing.T) {
 	}
 }
 
+func TestCrossJoin_EmptyProductDoesNotTraverseRows(t *testing.T) {
+	empty, err := New(Column("right", []int{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined, err := (Frame{rowCount: math.MaxInt}).CrossJoin(empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if joined.Len() != 0 || joined.Width() != 1 {
+		t.Fatalf("empty-product CrossJoin shape = %dx%d", joined.Len(), joined.Width())
+	}
+}
+
 func TestZeroWidthOuterJoins_RetainExpectedRowCounts(t *testing.T) {
 	leftKeys := series.New([]int{1, 2})
 	rightKeys := series.New([]int{3, 4})

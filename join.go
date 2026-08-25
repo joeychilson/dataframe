@@ -617,6 +617,9 @@ func joinRowIndexes(rows []int) series.Series[int] {
 
 func crossJoinLeftRows(leftLen, rightLen int) []int {
 	rows := make([]int, leftLen*rightLen)
+	if len(rows) == 0 {
+		return rows
+	}
 	offset := 0
 	for leftRow := range leftLen {
 		for i := range rightLen {
@@ -629,6 +632,9 @@ func crossJoinLeftRows(leftLen, rightLen int) []int {
 
 func crossJoinRightRows(leftLen, rightLen int) []int {
 	rows := make([]int, leftLen*rightLen)
+	if len(rows) == 0 {
+		return rows
+	}
 	offset := 0
 	for range leftLen {
 		for rightRow := range rightLen {

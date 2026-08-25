@@ -394,6 +394,27 @@ func TestWrite_PreservesSingleEmptyFieldRows(t *testing.T) {
 	}
 }
 
+func TestWrite_ReportsShortSingleEmptyFieldWrites(t *testing.T) {
+	frame, err := dataframe.New(dataframe.Column("value", []string{""}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := NewWriter(shortStringWriter{})
+	writer.Header = false
+	if writeErr := writer.Write(frame); !errors.Is(writeErr, io.ErrShortWrite) {
+		t.Fatalf("Write short-write error = %v, want io.ErrShortWrite", writeErr)
+	}
+
+	type row struct {
+		Value string
+	}
+	writer = NewWriter(shortStringWriter{})
+	writer.Header = false
+	if writeErr := writer.WriteRecords([]row{{}}); !errors.Is(writeErr, io.ErrShortWrite) {
+		t.Fatalf("WriteRecords short-write error = %v, want io.ErrShortWrite", writeErr)
+	}
+}
+
 func TestWriteRecords_UsesTextEncoders(t *testing.T) {
 	type row struct {
 		Code      textCode             `df:"code"`
@@ -713,6 +734,16 @@ func FuzzRecordRoundTrip(f *testing.F) {
 			t.Fatalf("round trip = %#v, want %#v\nCSV:\n%s", got, records, output.String())
 		}
 	})
+}
+
+type shortStringWriter struct{}
+
+func (shortStringWriter) Write(p []byte) (int, error) {
+	return len(p), nil
+}
+
+func (shortStringWriter) WriteString(s string) (int, error) {
+	return len(s) - 1, nil
 }
 
 type textCode int

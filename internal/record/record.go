@@ -116,12 +116,15 @@ func describe(typeOf reflect.Type) ([]Field, error) {
 	walk = func(current reflect.Type, prefix []int) error {
 		for i := range current.NumField() {
 			field := current.Field(i)
-			if field.PkgPath != "" {
-				continue
-			}
 			tag, tagged := field.Tag.Lookup("df")
 			name, _, _ := strings.Cut(tag, ",")
 			if tagged && name == "-" {
+				continue
+			}
+			if field.PkgPath != "" {
+				if field.Anonymous && field.Type.Kind() == reflect.Struct {
+					return fmt.Errorf("%w: unexported anonymous field %q", ErrInvalidRecord, field.Name)
+				}
 				continue
 			}
 			index := append(slices.Clone(prefix), i)

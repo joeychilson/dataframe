@@ -66,12 +66,13 @@ func (r Row) Get[T any](name string) (value T, present bool, err error) {
 //
 //   - exported fields participate; `df:"-"` ignores a field;
 //   - `df:"name"` sets a column name, otherwise the field name is used;
-//   - anonymous embedded structs are flattened;
+//   - exported anonymous embedded structs are flattened; an unexported
+//     anonymous embedded struct is invalid unless tagged `df:"-"`;
 //   - pointer-to-U and series.Optional[U] fields create nullable U columns;
 //   - other field types create exact, non-null columns of that Go type.
 //
-// Duplicate mapped names and a T that is not a non-pointer struct return an
-// error.
+// Duplicate mapped names, unexported anonymous embedded structs, and a T that
+// is not a non-pointer struct return an error.
 func FromRecords[T any](records []T) (Frame, error) {
 	fields, err := record.Describe(reflect.TypeFor[T]())
 	if err != nil {

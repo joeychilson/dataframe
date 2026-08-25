@@ -456,7 +456,10 @@ func (w *Writer) writeRecord(writer *stdcsv.Writer, record []string) error {
 	if w.UseCRLF {
 		line = "\"\"\r\n"
 	}
-	_, err := io.WriteString(w.output, line)
+	written, err := io.WriteString(w.output, line)
+	if err == nil && written != len(line) {
+		return io.ErrShortWrite
+	}
 	return err
 }
 

@@ -221,9 +221,7 @@ func (g Grouped[K]) Count[T any](values series.Series[T]) series.Series[int] {
 	for row := range values.Present() {
 		counts[g.rowGroups[row]]++
 	}
-	return series.NewFunc(g.Len(), func(i int) int {
-		return counts[i]
-	})
+	return series.New(counts)
 }
 
 // FirstPresent returns the first present value in each group. It panics on

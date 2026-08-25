@@ -147,9 +147,7 @@ type typedDistinctColumn[T comparable] struct {
 	values series.Series[T]
 }
 
-type distinctRowHasher struct {
-	columns []distinctColumn
-}
+type distinctRowHasher []distinctColumn
 
 func distinctBuiltinFrameRows(columns []column, length int) ([]int, bool) {
 	distinctColumns := make([]distinctColumn, len(columns))
@@ -161,7 +159,7 @@ func distinctBuiltinFrameRows(columns []column, length int) ([]int, bool) {
 		}
 	}
 
-	seen := hashmap.New[int, struct{}](distinctRowHasher{columns: distinctColumns}, length)
+	seen := hashmap.New[int, struct{}](distinctRowHasher(distinctColumns), length)
 	rows := make([]int, 0, length)
 	for row := range length {
 		if _, loaded := seen.LoadOrStore(row, struct{}{}); !loaded {
@@ -214,14 +212,14 @@ func newDistinctColumn(column column) (distinctColumn, bool) {
 
 // Hash writes row's validity and present column values into hash.
 func (h distinctRowHasher) Hash(hash *maphash.Hash, row int) {
-	for _, column := range h.columns {
+	for _, column := range h {
 		column.hash(hash, row)
 	}
 }
 
 // Equal reports whether two rows have matching validity and present values.
 func (h distinctRowHasher) Equal(left, right int) bool {
-	for _, column := range h.columns {
+	for _, column := range h {
 		if !column.equal(left, right) {
 			return false
 		}

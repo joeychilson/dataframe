@@ -70,7 +70,7 @@ func Asc[T cmp.Ordered](values series.Series[T]) SortKey {
 	case series.Series[float64]:
 		return SortKey{values: primitiveSortValues[float64]{values: values, encode: float64SortKey}}
 	}
-	return SortKey{values: orderedSortValues[T]{values: values}}
+	return SortKey{values: typedSortValues[T]{values: values, compare: cmp.Compare[T]}}
 }
 
 // Desc orders values descending with nulls last.
@@ -156,24 +156,6 @@ type sortValues interface {
 	sortStable(rows []int, reverse, nullsFirst bool)
 }
 
-type orderedSortValues[T cmp.Ordered] struct {
-	values series.Series[T]
-}
-
-func (v orderedSortValues[T]) len() int {
-	return v.values.Len()
-}
-
-func (v orderedSortValues[T]) compareRows(left, right int, reverse, nullsFirst bool) int {
-	return compareOrderedRows(v.values, left, right, reverse, nullsFirst)
-}
-
-func (v orderedSortValues[T]) sortStable(rows []int, reverse, nullsFirst bool) {
-	slices.SortStableFunc(rows, func(left, right int) int {
-		return v.compareRows(left, right, reverse, nullsFirst)
-	})
-}
-
 type primitiveSortValues[T cmp.Ordered] struct {
 	values series.Series[T]
 	encode func(T) uint64
@@ -184,7 +166,7 @@ func (v primitiveSortValues[T]) len() int {
 }
 
 func (v primitiveSortValues[T]) compareRows(left, right int, reverse, nullsFirst bool) int {
-	return compareOrderedRows(v.values, left, right, reverse, nullsFirst)
+	return compareOrderedRows(v.values, left, right, reverse, nullsFirst, cmp.Compare[T])
 }
 
 func (v primitiveSortValues[T]) sortStable(rows []int, reverse, nullsFirst bool) {
@@ -263,7 +245,7 @@ func (v primitiveSortValues[T]) sortStable(rows []int, reverse, nullsFirst bool)
 	copy(rows, current)
 }
 
-func compareOrderedRows[T cmp.Ordered](values series.Series[T], left, right int, reverse, nullsFirst bool) int {
+func compareOrderedRows[T any](values series.Series[T], left, right int, reverse, nullsFirst bool, compare func(T, T) int) int {
 	leftValue, leftPresent := values.At(left)
 	rightValue, rightPresent := values.At(right)
 	switch {
@@ -280,9 +262,9 @@ func compareOrderedRows[T cmp.Ordered](values series.Series[T], left, right int,
 		}
 		return -1
 	case reverse:
-		return cmp.Compare(rightValue, leftValue)
+		return compare(rightValue, leftValue)
 	default:
-		return cmp.Compare(leftValue, rightValue)
+		return compare(leftValue, rightValue)
 	}
 }
 
@@ -327,26 +309,7 @@ func (v typedSortValues[T]) len() int {
 }
 
 func (v typedSortValues[T]) compareRows(left, right int, reverse, nullsFirst bool) int {
-	leftValue, leftPresent := v.values.At(left)
-	rightValue, rightPresent := v.values.At(right)
-	switch {
-	case !leftPresent && !rightPresent:
-		return 0
-	case !leftPresent:
-		if nullsFirst {
-			return -1
-		}
-		return 1
-	case !rightPresent:
-		if nullsFirst {
-			return 1
-		}
-		return -1
-	case reverse:
-		return v.compare(rightValue, leftValue)
-	default:
-		return v.compare(leftValue, rightValue)
-	}
+	return compareOrderedRows(v.values, left, right, reverse, nullsFirst, v.compare)
 }
 
 func (v typedSortValues[T]) sortStable(rows []int, reverse, nullsFirst bool) {

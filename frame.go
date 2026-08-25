@@ -386,11 +386,10 @@ func (f Frame) FilterFunc[T any](values series.Series[T], keep func(T) bool) Fra
 	if keep == nil {
 		panic("dataframe: FilterFunc: nil predicate")
 	}
-	selection := mask.NewFunc(f.Len(), func(i int) bool {
+	return f.Filter(mask.NewFunc(f.Len(), func(i int) bool {
 		value, present := values.At(i)
 		return present && keep(value)
-	})
-	return f.Filter(selection)
+	}))
 }
 
 // Concat appends others' rows below f. All frames must have identical column

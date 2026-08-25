@@ -135,15 +135,13 @@ func (r *Reader) ReadRecords[T any]() (records []T, err error) {
 	for _, field := range fields {
 		fieldByName[field.Name] = field
 	}
-	columnFields := make([]record.Field, len(names))
-	mapped := make([]bool, len(names))
+	scanners := make([]fieldScanner, len(names))
 	for i, name := range names {
 		field, ok := fieldByName[name]
 		if !ok {
 			continue
 		}
-		columnFields[i] = field
-		mapped[i] = true
+		scanners[i].field = field
 		delete(fieldByName, name)
 	}
 	for _, field := range fields {
@@ -153,10 +151,8 @@ func (r *Reader) ReadRecords[T any]() (records []T, err error) {
 	}
 
 	destinations := make([]any, len(names))
-	scanners := make([]fieldScanner, len(names))
 	for i := range destinations {
-		if mapped[i] {
-			scanners[i].field = columnFields[i]
+		if scanners[i].field.Name != "" {
 			destinations[i] = &scanners[i]
 		} else {
 			destinations[i] = new(stdsql.RawBytes)
@@ -167,7 +163,7 @@ func (r *Reader) ReadRecords[T any]() (records []T, err error) {
 		records = append(records, zero)
 		recordValue := reflect.ValueOf(&records[len(records)-1]).Elem()
 		for i := range scanners {
-			if mapped[i] {
+			if scanners[i].field.Name != "" {
 				scanners[i].record = recordValue
 			}
 		}

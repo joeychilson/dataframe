@@ -76,8 +76,7 @@ func (r Row) Get[T any](name string) (value T, present bool, err error) {
 // Duplicate mapped names and a T that is not a non-pointer struct return an
 // error.
 func FromRecords[T any](records []T) (Frame, error) {
-	typeOf := reflect.TypeFor[T]()
-	fields, err := record.Describe(typeOf)
+	fields, err := record.Describe(reflect.TypeFor[T]())
 	if err != nil {
 		return Frame{}, err
 	}
@@ -111,8 +110,7 @@ func FromRecords[T any](records []T) (Frame, error) {
 // columns are ignored. Every mapped field must find an exactly typed column;
 // null in a plain field is an error.
 func (f Frame) Records[T any]() ([]T, error) {
-	typeOf := reflect.TypeFor[T]()
-	fields, err := record.Describe(typeOf)
+	fields, err := record.Describe(reflect.TypeFor[T]())
 	if err != nil {
 		return nil, err
 	}
